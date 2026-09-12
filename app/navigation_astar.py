@@ -5,48 +5,54 @@ from __future__ import annotations
 OceanSight-V
 4D A* Navigation Engine
 
-Search dimensions
------------------
-    latitude
-    longitude
-    depth
-    time
+Temporal design
+---------------
 
-Temporal model
---------------
-The navigation engine distinguishes:
+This engine maintains TWO separate clocks:
 
-    vessel/departure time
-        from
-    scientific HYCOM source time.
+1. Vessel physical time
+   ---------------------
+   Calculated from actual route-segment travel time.
 
-HYCOM model times are obtained only from NavigationTimeAdapter.
+2. HYCOM model time
+   -----------------
+   Selected only from actual INCOIS HYCOM source TIME values.
 
-Therefore this module NEVER constructs environmental timestamps using:
+Environmental state policy
+--------------------------
+For a vessel state at physical time T:
 
-    departure + arbitrary configured minutes
+    use the latest real HYCOM source time <= T
 
-Instead:
+No interpolation is performed.
 
-    SearchState.time_index
-        -> index into the REAL HYCOM source-time sequence
-           used by this search.
+Important transition rule
+-------------------------
+A moving spatial edge may not silently cross a HYCOM source-time boundary.
 
-Important:
-    time_index=0 always means the first real HYCOM model timestamp
-    selected for the current search.
+If the vessel needs to advance to the next model state, the engine may
+perform an explicit MODEL-TIME SYNCHRONIZATION / WAIT transition:
+
+    same position
+    current model time
+          ->
+    next real HYCOM model time
+
+This makes the temporal transition explicit instead of inventing
+environmental timestamps.
 
 Scientific rules
 ----------------
 - No synthetic ocean data.
-- No silent interpolation.
+- No environmental interpolation.
 - No invented HYCOM timestamps.
-- Environmental data is queried only at exact real HYCOM source times.
-- Vessel physical travel time is tracked separately.
-- Search policy is enforced before expensive environment queries.
-- Existing navigation cost calculations are preserved.
+- HYCOM environmental states come only from real INCOIS source times.
+- Vessel physical time is tracked independently.
+- Spatial edges may not cross a model boundary silently.
+- Explicit model-boundary waiting is allowed only when waiting is enabled.
 """
 
+from bisect import bisect_right
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from heapq import heappop, heappush
@@ -95,11 +101,13 @@ class SearchState:
     One node in the 4D navigation graph.
 
     time_index:
-        Index into the REAL HYCOM source-time sequence selected for this
-        navigation search.
+        Index into the SEARCH-LOCAL REAL HYCOM source-time sequence.
 
     Important:
-        time_index=0 is always the first model layer used by this search.
+        time_index describes the environmental/model state currently
+        associated with the physical vessel arrival state.
+
+        It is NOT a count of arbitrary minutes.
     """
 
     latitude: float
@@ -132,13 +140,12 @@ class AStarResult:
     generated_nodes: int
     message: str
 
-    # -------------------------------------------------------------------------
-    # Temporal provenance.
-    # -------------------------------------------------------------------------
-
     departure_vessel_time_utc: str | None = None
     starting_model_time_utc: str | None = None
     model_times_utc: list[str] | None = None
+
+    # Physical vessel elapsed time for every route state.
+    vessel_elapsed_seconds: list[float] | None = None
 
 
 # =============================================================================
@@ -175,8 +182,7 @@ def haversine_distance_m(
     """
     Great-circle horizontal distance between two geographic points.
 
-    Depth is deliberately excluded because this calculates horizontal
-    geographic separation.
+    Depth is deliberately excluded.
     """
 
     lat1 = radians(
@@ -305,6 +311,7 @@ def parse_utc(
     ).strip()
 
     if text.endswith("Z"):
+
         text = (
             text[:-1]
             + "+00:00"
@@ -315,6 +322,7 @@ def parse_utc(
     )
 
     if parsed.tzinfo is None:
+
         raise ValueError(
             "UTC time must include an explicit timezone."
         )
@@ -350,23 +358,12 @@ def format_utc(
 
 class NeighborGenerator:
     """
-    Generate neighboring 4D search states.
+    Generate spatial and depth candidate moves.
 
-    Spatial transitions:
-        north
-        south
-        east
-        west
-        four diagonals
+    Temporal advancement is NOT performed here.
 
-    Optional transition:
-        wait in place
-
-    Every transition advances exactly one REAL HYCOM MODEL-TIME layer.
-
-    `time_step_minutes` remains in the public signature for compatibility
-    with the existing codebase, but it no longer defines environmental
-    timestamps.
+    A* determines temporal advancement after calculating physical vessel
+    arrival time.
     """
 
     def __init__(
@@ -378,16 +375,19 @@ class NeighborGenerator:
     ) -> None:
 
         if latitude_step_deg <= 0.0:
+
             raise ValueError(
                 "latitude_step_deg must be greater than zero."
             )
 
         if longitude_step_deg <= 0.0:
+
             raise ValueError(
                 "longitude_step_deg must be greater than zero."
             )
 
         if depth_step_m <= 0.0:
+
             raise ValueError(
                 "depth_step_m must be greater than zero."
             )
@@ -409,27 +409,17 @@ class NeighborGenerator:
         state: SearchState,
         *,
         target_depth_m: float,
-        time_step_minutes: int,
         allow_waiting: bool = True,
     ) -> list[SearchState]:
         """
-        Generate valid candidate next states.
+        Generate spatial/depth neighbors.
 
-        Every candidate advances one model-time layer.
+        All generated candidates initially remain in the current
+        environmental model layer.
 
-        The actual elapsed duration of that layer comes from the discovered
-        INCOIS HYCOM source-time sequence used by the A* engine.
+        A* may subsequently convert a boundary-wait action into the
+        next real model layer.
         """
-
-        if time_step_minutes <= 0:
-            raise ValueError(
-                "time_step_minutes must be greater than zero."
-            )
-
-        next_time = (
-            state.time_index
-            + 1
-        )
 
         spatial_moves = [
             (
@@ -467,6 +457,7 @@ class NeighborGenerator:
         ]
 
         if allow_waiting:
+
             spatial_moves.insert(
                 0,
                 (
@@ -564,7 +555,9 @@ class NeighborGenerator:
                         latitude=latitude,
                         longitude=longitude,
                         depth_m=depth,
-                        time_index=next_time,
+                        time_index=(
+                            state.time_index
+                        ),
                     )
                 )
 
@@ -585,11 +578,11 @@ def heuristic_cost(
     """
     Lower-bound-oriented travel-time heuristic.
 
-    Uses horizontal great-circle distance divided by configured vessel
-    speed. It does not assume a favorable ocean current.
+    This heuristic ignores favorable currents.
     """
 
     if vessel_speed_m_s <= 0.0:
+
         raise ValueError(
             "vessel_speed_m_s must be greater than zero."
         )
@@ -619,29 +612,25 @@ class OceanSightAStar:
     Standalone OceanSight-V 4D A* engine.
 
     Temporal architecture
-    ---------------------
-    A search first resolves the vessel departure time against real HYCOM
-    source times.
+    ----------------------
 
-    Example:
+    Vessel physical time is tracked continuously through edge travel time.
 
-        vessel departure:
-            2026-09-10T07:00:00Z
+    Environmental/model time is discrete and comes only from the real
+    INCOIS HYCOM source-time sequence.
 
-        real HYCOM source times:
-            2026-09-10T06:00:00Z
-            2026-09-10T12:00:00Z
-            2026-09-10T18:00:00Z
+    Moving edges cannot silently cross a model boundary.
 
-    Search timeline:
+    When waiting is enabled, a dedicated temporal synchronization action
+    may advance:
 
-        time_index=0 -> 12:00Z
-        time_index=1 -> 18:00Z
-        time_index=2 -> next real source time
+        model index N
+            ->
+        model index N+1
 
-    The vessel departure remains 07:00Z in provenance.
+    while keeping the vessel at the same location.
 
-    Physical travel time is tracked independently using navigation_cost.
+    This is deliberately explicit.
     """
 
     def __init__(
@@ -669,16 +658,19 @@ class OceanSightAStar:
         )
 
         if self.latitude_step_deg <= 0.0:
+
             raise ValueError(
                 "latitude_step_deg must be greater than zero."
             )
 
         if self.longitude_step_deg <= 0.0:
+
             raise ValueError(
                 "longitude_step_deg must be greater than zero."
             )
 
         if self.depth_step_m <= 0.0:
+
             raise ValueError(
                 "depth_step_m must be greater than zero."
             )
@@ -703,10 +695,6 @@ class OceanSightAStar:
             )
         )
 
-        # ---------------------------------------------------------------------
-        # Ensure the environment has the real HYCOM time adapter.
-        # ---------------------------------------------------------------------
-
         if self.environment.time_adapter is None:
 
             self.environment.time_adapter = (
@@ -714,17 +702,16 @@ class OceanSightAStar:
             )
 
     # =========================================================================
-    # MODEL TIME SEQUENCE
+    # SOURCE TIMES
     # =========================================================================
 
     def _source_times(
         self,
     ) -> list[str]:
-        """
-        Return the real INCOIS HYCOM source-time sequence.
-        """
 
-        adapter = self.environment.time_adapter
+        adapter = (
+            self.environment.time_adapter
+        )
 
         if adapter is None:
 
@@ -744,27 +731,39 @@ class OceanSightAStar:
 
         return times
 
-    def _source_time_for_index(
-        self,
-        time_index: int,
+    @staticmethod
+    def _parsed_source_times(
         source_times: list[str],
-    ) -> str:
+    ) -> list[datetime]:
 
-        if (
-            time_index < 0
-            or time_index >= len(
-                source_times
+        return [
+            parse_utc(
+                value
             )
-        ):
-
-            raise IndexError(
-                "HYCOM source-time index is outside the discovered "
-                "source-time sequence."
-            )
-
-        return source_times[
-            time_index
+            for value in source_times
         ]
+
+    @staticmethod
+    def _latest_source_index_at_or_before(
+        vessel_time: datetime,
+        parsed_source_times: list[datetime],
+    ) -> int | None:
+        """
+        Find the latest real HYCOM source time <= vessel time.
+
+        No interpolation.
+        """
+
+        position = bisect_right(
+            parsed_source_times,
+            vessel_time,
+        )
+
+        if position <= 0:
+
+            return None
+
+        return position - 1
 
     # =========================================================================
     # ENVIRONMENT
@@ -776,19 +775,22 @@ class OceanSightAStar:
         *,
         source_times: list[str],
     ) -> NavigationEnvironmentState:
-        """
-        Retrieve the scientific environment for a 4D state.
 
-        The environmental timestamp comes exclusively from the real
-        HYCOM source-time sequence.
-        """
-
-        timestamp = (
-            self._source_time_for_index(
-                state.time_index,
-                source_times,
+        if (
+            state.time_index < 0
+            or state.time_index >= len(
+                source_times
             )
-        )
+        ):
+
+            raise IndexError(
+                "HYCOM source-time index is outside "
+                "the navigation timeline."
+            )
+
+        model_time = source_times[
+            state.time_index
+        ]
 
         environment = (
             self.environment.sample(
@@ -802,7 +804,7 @@ class OceanSightAStar:
                     state.depth_m
                 ),
                 time_utc=(
-                    timestamp
+                    model_time
                 ),
             )
         )
@@ -821,9 +823,6 @@ class OceanSightAStar:
         self,
         request: NavigationRequest,
     ) -> AStarResult:
-        """
-        Execute bounded 4D A* using real HYCOM model-time layers.
-        """
 
         # ---------------------------------------------------------------------
         # SEARCH POLICY
@@ -857,7 +856,7 @@ class OceanSightAStar:
             )
 
         # ---------------------------------------------------------------------
-        # REQUEST DEPARTURE TIME
+        # DEPARTURE TIME
         # ---------------------------------------------------------------------
 
         try:
@@ -880,35 +879,82 @@ class OceanSightAStar:
                 ),
             )
 
-        time_step_minutes = int(
-            request.time_step_minutes
+        # ---------------------------------------------------------------------
+        # OPTIONAL MINIMUM ARRIVAL TIME
+        # ---------------------------------------------------------------------
+        #
+        # This is a physical vessel-time constraint. It is intentionally
+        # separate from HYCOM model time. When supplied, the vessel may reach
+        # the geographic destination earlier, but A* will not terminate until
+        # the physical vessel clock has reached this earliest-arrival time.
+        #
+        # getattr() keeps this engine backward-compatible with older
+        # NavigationRequest models until the field is added to the request
+        # contract.
+        # ---------------------------------------------------------------------
+
+        minimum_arrival_time = None
+
+        minimum_arrival_time_raw = getattr(
+            request,
+            "minimum_arrival_time_utc",
+            None,
         )
+
+        if minimum_arrival_time_raw is not None:
+
+            try:
+
+                minimum_arrival_time = parse_utc(
+                    minimum_arrival_time_raw
+                )
+
+            except ValueError as exc:
+
+                return AStarResult(
+                    found=False,
+                    goal_state=None,
+                    route=[],
+                    expanded_nodes=0,
+                    generated_nodes=0,
+                    message=(
+                        "Invalid minimum arrival time: "
+                        f"{exc}"
+                    ),
+                )
+
+            if minimum_arrival_time < departure_time:
+
+                return AStarResult(
+                    found=False,
+                    goal_state=None,
+                    route=[],
+                    expanded_nodes=0,
+                    generated_nodes=0,
+                    message=(
+                        "minimum_arrival_time_utc cannot be earlier "
+                        "than departure_time_utc."
+                    ),
+                )
 
         max_search_nodes = int(
             request.max_search_nodes
         )
 
-        if time_step_minutes <= 0:
-
-            return AStarResult(
-                found=False,
-                goal_state=None,
-                route=[],
-                expanded_nodes=0,
-                generated_nodes=0,
-                message=(
-                    "time_step_minutes must be greater than zero."
-                ),
-            )
-
         # ---------------------------------------------------------------------
-        # DISCOVER REAL MODEL TIMES
+        # REAL HYCOM SOURCE TIME AXIS
         # ---------------------------------------------------------------------
 
         try:
 
             global_source_times = (
                 self._source_times()
+            )
+
+            global_parsed_times = (
+                self._parsed_source_times(
+                    global_source_times
+                )
             )
 
         except Exception as exc:
@@ -926,96 +972,22 @@ class OceanSightAStar:
             )
 
         # ---------------------------------------------------------------------
-        # RESOLVE VESSEL DEPARTURE TO FIRST REAL MODEL TIME.
+        # STARTING MODEL STATE
         #
-        # IMPORTANT:
+        # Use the latest real HYCOM source time at or before the vessel
+        # departure.
         #
-        # We preserve the requested vessel departure exactly.
-        #
-        # We only select an explicit real model timestamp for environmental
-        # sampling.
+        # This avoids looking into a future model state.
         # ---------------------------------------------------------------------
 
-        adapter = self.environment.time_adapter
-
-        if adapter is None:
-
-            return AStarResult(
-                found=False,
-                goal_state=None,
-                route=[],
-                expanded_nodes=0,
-                generated_nodes=0,
-                message=(
-                    "NavigationTimeAdapter is required for "
-                    "4D model-time routing."
-                ),
+        starting_global_index = (
+            self._latest_source_index_at_or_before(
+                departure_time,
+                global_parsed_times,
             )
-
-        try:
-
-            resolved_start = (
-                adapter.next_valid(
-                    format_utc(
-                        departure_time
-                    )
-                )
-            )
-
-        except Exception as exc:
-
-            return AStarResult(
-                found=False,
-                goal_state=None,
-                route=[],
-                expanded_nodes=0,
-                generated_nodes=0,
-                message=(
-                    "Unable to resolve vessel departure time "
-                    "against HYCOM source times: "
-                    f"{exc}"
-                ),
-            )
-
-        if resolved_start is None:
-
-            return AStarResult(
-                found=False,
-                goal_state=None,
-                route=[],
-                expanded_nodes=0,
-                generated_nodes=0,
-                message=(
-                    "No real INCOIS HYCOM source time exists at "
-                    "or after the requested vessel departure time."
-                ),
-                departure_vessel_time_utc=(
-                    format_utc(
-                        departure_time
-                    )
-                ),
-                model_times_utc=[],
-            )
-
-        starting_model_time = (
-            resolved_start.model_time_utc
         )
 
-        # ---------------------------------------------------------------------
-        # Build a SEARCH-LOCAL model-time sequence.
-        #
-        # Therefore the first layer is always index 0.
-        # ---------------------------------------------------------------------
-
-        try:
-
-            starting_source_index = (
-                global_source_times.index(
-                    starting_model_time
-                )
-            )
-
-        except ValueError:
+        if starting_global_index is None:
 
             return AStarResult(
                 found=False,
@@ -1024,25 +996,40 @@ class OceanSightAStar:
                 expanded_nodes=0,
                 generated_nodes=0,
                 message=(
-                    "Resolved HYCOM model time was not found "
-                    "in the discovered source-time sequence."
+                    "Requested vessel departure occurs before "
+                    "the earliest available INCOIS HYCOM source time."
                 ),
                 departure_vessel_time_utc=(
                     format_utc(
                         departure_time
                     )
-                ),
-                starting_model_time_utc=(
-                    starting_model_time
                 ),
                 model_times_utc=(
                     global_source_times
                 ),
             )
 
+        starting_model_time = (
+            global_source_times[
+                starting_global_index
+            ]
+        )
+
+        # ---------------------------------------------------------------------
+        # SEARCH-LOCAL MODEL TIME AXIS
+        #
+        # time_index 0 is always the first model layer used by this search.
+        # ---------------------------------------------------------------------
+
         search_model_times = (
             global_source_times[
-                starting_source_index:
+                starting_global_index:
+            ]
+        )
+
+        search_model_datetimes = (
+            global_parsed_times[
+                starting_global_index:
             ]
         )
 
@@ -1055,8 +1042,7 @@ class OceanSightAStar:
                 expanded_nodes=0,
                 generated_nodes=0,
                 message=(
-                    "No real HYCOM model-time layers are available "
-                    "for the navigation search."
+                    "No real HYCOM model-time layers are available."
                 ),
                 departure_vessel_time_utc=(
                     format_utc(
@@ -1070,9 +1056,7 @@ class OceanSightAStar:
             )
 
         # ---------------------------------------------------------------------
-        # START / GOAL
-        #
-        # Both begin at local search time_index=0.
+        # START
         # ---------------------------------------------------------------------
 
         start = SearchState(
@@ -1087,6 +1071,14 @@ class OceanSightAStar:
             ),
             time_index=0,
         )
+
+        # ---------------------------------------------------------------------
+        # GOAL
+        # ---------------------------------------------------------------------
+        #
+        # Goal location has no fixed model time. The vessel may reach the
+        # destination in any valid environmental layer.
+        # ---------------------------------------------------------------------
 
         goal = SearchState(
             latitude=float(
@@ -1128,10 +1120,12 @@ class OceanSightAStar:
                     - goal.latitude
                 )
                 <= latitude_tolerance
+
                 and abs(
                     longitude_difference
                 )
                 <= longitude_tolerance
+
                 and abs(
                     state.depth_m
                     - goal.depth_m
@@ -1171,7 +1165,7 @@ class OceanSightAStar:
         )
 
         # ---------------------------------------------------------------------
-        # COSTS / PARENTS / CACHE
+        # SCORES
         # ---------------------------------------------------------------------
 
         g_score: dict[
@@ -1191,12 +1185,7 @@ class OceanSightAStar:
             NavigationEnvironmentState,
         ] = {}
 
-        # ---------------------------------------------------------------------
-        # Physical vessel elapsed time.
-        #
-        # This is intentionally separate from HYCOM model time.
-        # ---------------------------------------------------------------------
-
+        # Physical vessel elapsed time at each state.
         vessel_elapsed_seconds: dict[
             SearchState,
             float,
@@ -1208,7 +1197,7 @@ class OceanSightAStar:
         generated_nodes = 1
 
         # ---------------------------------------------------------------------
-        # ENVIRONMENT CACHE HELPER
+        # CACHE
         # ---------------------------------------------------------------------
 
         def get_environment(
@@ -1259,8 +1248,8 @@ class OceanSightAStar:
                 expanded_nodes=0,
                 generated_nodes=0,
                 message=(
-                    "Unable to sample starting "
-                    f"environment: {exc}"
+                    "Unable to sample starting environment: "
+                    f"{exc}"
                 ),
                 departure_vessel_time_utc=(
                     format_utc(
@@ -1284,7 +1273,7 @@ class OceanSightAStar:
         )
 
         # ---------------------------------------------------------------------
-        # MAIN A* LOOP
+        # MAIN LOOP
         # ---------------------------------------------------------------------
 
         while open_heap:
@@ -1297,12 +1286,37 @@ class OceanSightAStar:
                 open_heap
             )
 
+            current_g = g_score.get(
+                current,
+                float("inf"),
+            )
+
+            current_vessel_elapsed = (
+                vessel_elapsed_seconds.get(
+                    current,
+                    float("inf"),
+                )
+            )
+
+            current_vessel_time = (
+                departure_time
+                + timedelta(
+                    seconds=current_vessel_elapsed
+                )
+            )
+
             # -------------------------------------------------------------
-            # GOAL
+            # GOAL / EARLIEST-ARRIVAL CONSTRAINT
             # -------------------------------------------------------------
 
-            if reached_goal(
-                current
+            minimum_arrival_satisfied = (
+                minimum_arrival_time is None
+                or current_vessel_time >= minimum_arrival_time
+            )
+
+            if (
+                reached_goal(current)
+                and minimum_arrival_satisfied
             ):
 
                 route = (
@@ -1311,6 +1325,14 @@ class OceanSightAStar:
                         parents,
                     )
                 )
+
+                elapsed_values = [
+                    vessel_elapsed_seconds.get(
+                        state,
+                        0.0,
+                    )
+                    for state in route
+                ]
 
                 return AStarResult(
                     found=True,
@@ -1324,7 +1346,8 @@ class OceanSightAStar:
                     ),
                     message=(
                         "4D A* route found using real "
-                        "INCOIS HYCOM source-time layers."
+                        "INCOIS HYCOM source-time states "
+                        "with physically tracked vessel time."
                     ),
                     departure_vessel_time_utc=(
                         format_utc(
@@ -1336,6 +1359,9 @@ class OceanSightAStar:
                     ),
                     model_times_utc=(
                         search_model_times
+                    ),
+                    vessel_elapsed_seconds=(
+                        elapsed_values
                     ),
                 )
 
@@ -1377,16 +1403,6 @@ class OceanSightAStar:
                     ),
                 )
 
-            current_g = g_score[
-                current
-            ]
-
-            current_vessel_elapsed = (
-                vessel_elapsed_seconds[
-                    current
-                ]
-            )
-
             # -------------------------------------------------------------
             # CURRENT ENVIRONMENT
             # -------------------------------------------------------------
@@ -1404,48 +1420,234 @@ class OceanSightAStar:
                 continue
 
             # -------------------------------------------------------------
-            # LAST MODEL LAYER
+            # CURRENT PHYSICAL VESSEL TIME
             # -------------------------------------------------------------
+            # Already calculated before the goal check so the same physical
+            # clock is used consistently by the goal constraint, waiting
+            # transition, and spatial-transition logic.
+
+            # -------------------------------------------------------------
+            # CURRENT / NEXT MODEL TIME
+            # -------------------------------------------------------------
+
+            current_model_time = (
+                search_model_datetimes[
+                    current.time_index
+                ]
+            )
+
+            next_model_time = None
 
             if (
-                current.time_index
-                >= len(
-                    search_model_times
+                current.time_index + 1
+                < len(
+                    search_model_datetimes
                 )
-                - 1
             ):
 
-                continue
+                next_model_time = (
+                    search_model_datetimes[
+                        current.time_index + 1
+                    ]
+                )
 
-            # -------------------------------------------------------------
-            # ACTUAL REAL MODEL INTERVAL
-            # -------------------------------------------------------------
+            # =============================================================
+            # EXPLICIT MODEL-TIME SYNCHRONIZATION
+            # =============================================================
+            #
+            # This action is separate from normal spatial movement.
+            #
+            # It is available only when waiting is enabled.
+            #
+            # The vessel stays at the same coordinates and waits until the
+            # next REAL HYCOM source time.
+            # =============================================================
 
-            current_model_time = parse_utc(
-                search_model_times[
-                    current.time_index
-                ]
-            )
+            if (
+                request.allow_waiting
+                and next_model_time is not None
+            ):
 
-            next_model_time = parse_utc(
-                search_model_times[
-                    current.time_index
-                    + 1
-                ]
-            )
+                wait_seconds = (
+                    next_model_time
+                    - current_vessel_time
+                ).total_seconds()
 
-            model_interval_seconds = (
-                next_model_time
-                - current_model_time
-            ).total_seconds()
+                # Only a future boundary can be waited for.
+                if wait_seconds > EPSILON:
 
-            if model_interval_seconds <= 0.0:
+                    wait_hours = (
+                        wait_seconds
+                        / 3600.0
+                    )
 
-                continue
+                    if (
+                        constraints.max_route_duration_hours
+                        is None
+                        or (
+                            (
+                                current_vessel_elapsed
+                                + wait_seconds
+                            )
+                            / 3600.0
+                            <= constraints.max_route_duration_hours
+                        )
+                    ):
 
-            # -------------------------------------------------------------
-            # NEIGHBORS
-            # -------------------------------------------------------------
+                        wait_state = SearchState(
+                            latitude=(
+                                current.latitude
+                            ),
+                            longitude=(
+                                current.longitude
+                            ),
+                            depth_m=(
+                                current.depth_m
+                            ),
+                            time_index=(
+                                current.time_index
+                                + 1
+                            ),
+                        )
+
+                        # Waiting itself gets a small deterministic cost.
+                        waiting_cost = (
+                            wait_hours
+                            * request.weights.waiting_penalty_weight
+                        )
+
+                        tentative_wait_g = (
+                            current_g
+                            + waiting_cost
+                        )
+
+                        known_wait_g = (
+                            g_score.get(
+                                wait_state,
+                                float("inf"),
+                            )
+                        )
+
+                        if (
+                            tentative_wait_g
+                            < known_wait_g
+                        ):
+
+                            try:
+                                wait_environment = (
+                                    get_environment(
+                                        wait_state
+                                    )
+                                )
+
+                                wait_edge = NavigationEdgeCost(
+    distance_m=0.0,
+
+    distance_cost=0.0,
+
+    route_bearing_math_deg=0.0,
+
+    along_route_current_m_s=0.0,
+    opposing_current_m_s=0.0,
+    cross_route_current_m_s=0.0,
+
+    vessel_speed_m_s=(
+        constraints.vessel_speed_m_s
+    ),
+
+    effective_ground_speed_m_s=(
+        constraints.vessel_speed_m_s
+    ),
+
+    travel_time_seconds=(
+        wait_seconds
+    ),
+
+    travel_time_hours=(
+        wait_hours
+    ),
+
+    time_cost=(
+        wait_hours
+        * request.weights.time_penalty_weight
+    ),
+
+    current_penalty=0.0,
+    hazard_penalty=0.0,
+
+    total_cost=(
+        waiting_cost
+    ),
+
+    traversable=True,
+
+    blocked_reason=None,
+)
+
+                            except Exception as exc:
+                                print(
+                                    "WAIT TRANSITION REJECTED:"
+                                    f" {exc}"
+                                )
+
+                                wait_environment = None
+                                wait_edge = None
+                            if (
+                                wait_environment
+                                is not None
+                                and wait_edge
+                                is not None
+                            ):
+
+                                g_score[
+                                    wait_state
+                                ] = tentative_wait_g
+
+                                vessel_elapsed_seconds[
+                                    wait_state
+                                ] = (
+                                    current_vessel_elapsed
+                                    + wait_seconds
+                                )
+
+                                parents[
+                                    wait_state
+                                ] = ParentRecord(
+                                    parent=current,
+                                    edge_cost=wait_edge,
+                                    environment=(
+                                        wait_environment
+                                    ),
+                                )
+
+                                wait_h = (
+                                    heuristic_cost(
+                                        state=wait_state,
+                                        goal=goal,
+                                        vessel_speed_m_s=(
+                                            constraints
+                                            .vessel_speed_m_s
+                                        ),
+                                    )
+                                )
+
+                                counter += 1
+
+                                heappush(
+                                    open_heap,
+                                    (
+                                        tentative_wait_g
+                                        + wait_h,
+                                        counter,
+                                        wait_state,
+                                    ),
+                                )
+
+                                generated_nodes += 1
+
+            # =============================================================
+            # NORMAL SPATIAL / DEPTH TRANSITIONS
+            # =============================================================
 
             neighbors = (
                 self.neighbor_generator.neighbors(
@@ -1453,16 +1655,11 @@ class OceanSightAStar:
                     target_depth_m=(
                         goal.depth_m
                     ),
-                    time_step_minutes=(
-                        time_step_minutes
-                    ),
-                    allow_waiting=(
-                        request.allow_waiting
-                    ),
+                    allow_waiting=False,
                 )
             )
 
-            for neighbor in neighbors:
+            for candidate in neighbors:
 
                 # ---------------------------------------------------------
                 # DEPTH CONSTRAINTS
@@ -1471,7 +1668,7 @@ class OceanSightAStar:
                 if (
                     constraints.min_depth_m
                     is not None
-                    and neighbor.depth_m
+                    and candidate.depth_m
                     < constraints.min_depth_m
                 ):
 
@@ -1480,25 +1677,9 @@ class OceanSightAStar:
                 if (
                     constraints.max_depth_m
                     is not None
-                    and neighbor.depth_m
+                    and candidate.depth_m
                     > constraints.max_depth_m
                 ):
-
-                    continue
-
-                # ---------------------------------------------------------
-                # ENVIRONMENT
-                # ---------------------------------------------------------
-
-                try:
-
-                    neighbor_environment = (
-                        get_environment(
-                            neighbor
-                        )
-                    )
-
-                except Exception:
 
                     continue
 
@@ -1510,8 +1691,8 @@ class OceanSightAStar:
                     haversine_distance_m(
                         current.latitude,
                         current.longitude,
-                        neighbor.latitude,
-                        neighbor.longitude,
+                        candidate.latitude,
+                        candidate.longitude,
                     )
                 )
 
@@ -1519,8 +1700,8 @@ class OceanSightAStar:
                     route_bearing_math_deg(
                         current.latitude,
                         current.longitude,
-                        neighbor.latitude,
-                        neighbor.longitude,
+                        candidate.latitude,
+                        candidate.longitude,
                     )
                 )
 
@@ -1559,10 +1740,6 @@ class OceanSightAStar:
 
                     continue
 
-                # ---------------------------------------------------------
-                # PHYSICAL EDGE TRAVEL TIME
-                # ---------------------------------------------------------
-
                 edge_travel_seconds = float(
                     edge_cost.travel_time_seconds
                 )
@@ -1572,31 +1749,98 @@ class OceanSightAStar:
                     continue
 
                 # ---------------------------------------------------------
-                # PHYSICAL FEASIBILITY
-                #
-                # One graph edge represents movement during one actual
-                # HYCOM source interval.
-                #
-                # The vessel cannot require more physical travel time
-                # than the environmental interval represented by that edge.
-                # ---------------------------------------------------------
-
-                if (
-                    edge_travel_seconds
-                    > model_interval_seconds
-                    + EPSILON
-                ):
-
-                    continue
-
-                # ---------------------------------------------------------
-                # VESSEL TRAVEL TIME
+                # PHYSICAL VESSEL ARRIVAL
                 # ---------------------------------------------------------
 
                 tentative_vessel_elapsed = (
                     current_vessel_elapsed
                     + edge_travel_seconds
                 )
+
+                tentative_vessel_time = (
+                    departure_time
+                    + timedelta(
+                        seconds=(
+                            tentative_vessel_elapsed
+                        )
+                    )
+                )
+
+                # ---------------------------------------------------------
+                # MODEL BOUNDARY RULE
+                #
+                # A moving edge may not silently cross a source-time
+                # boundary.
+                #
+                # Example:
+                #
+                # current model state = 06:00
+                # next model state    = 12:00
+                #
+                # if the moving edge ends at 12:03, it is rejected.
+                #
+                # The search can instead wait explicitly at the current
+                # position until 12:00 and then move using the new state.
+                #
+                # This is intentionally conservative.
+                # ---------------------------------------------------------
+
+                if (
+                    next_model_time is not None
+                    and tentative_vessel_time
+                    > next_model_time
+                    + timedelta(
+                        seconds=EPSILON
+                    )
+                ):
+
+                    continue
+
+                # ---------------------------------------------------------
+                # DETERMINE MODEL STATE AT ARRIVAL
+                # ---------------------------------------------------------
+
+                candidate_model_index = (
+                    self._latest_source_index_at_or_before(
+                        tentative_vessel_time,
+                        search_model_datetimes,
+                    )
+                )
+
+                if candidate_model_index is None:
+
+                    continue
+
+                # ---------------------------------------------------------
+                # Normal movement can remain in the current model state
+                # or arrive exactly at the next boundary.
+                # ---------------------------------------------------------
+
+                if (
+                    candidate_model_index
+                    > current.time_index + 1
+                ):
+
+                    continue
+
+                neighbor = SearchState(
+                    latitude=(
+                        candidate.latitude
+                    ),
+                    longitude=(
+                        candidate.longitude
+                    ),
+                    depth_m=(
+                        candidate.depth_m
+                    ),
+                    time_index=(
+                        candidate_model_index
+                    ),
+                )
+
+                # ---------------------------------------------------------
+                # ROUTE DURATION
+                # ---------------------------------------------------------
 
                 elapsed_hours = (
                     tentative_vessel_elapsed
@@ -1609,6 +1853,22 @@ class OceanSightAStar:
                     and elapsed_hours
                     > constraints.max_route_duration_hours
                 ):
+
+                    continue
+
+                # ---------------------------------------------------------
+                # DESTINATION ENVIRONMENT
+                # ---------------------------------------------------------
+
+                try:
+
+                    neighbor_environment = (
+                        get_environment(
+                            neighbor
+                        )
+                    )
+
+                except Exception:
 
                     continue
 
@@ -1634,7 +1894,7 @@ class OceanSightAStar:
                     continue
 
                 # ---------------------------------------------------------
-                # BEST PATH UPDATE
+                # PATH UPDATE
                 # ---------------------------------------------------------
 
                 g_score[
@@ -1660,7 +1920,8 @@ class OceanSightAStar:
                         state=neighbor,
                         goal=goal,
                         vessel_speed_m_s=(
-                            constraints.vessel_speed_m_s
+                            constraints
+                            .vessel_speed_m_s
                         ),
                     )
                 )
@@ -1777,10 +2038,6 @@ class NavigationRouteEngine:
             else NavigationEnvironment()
         )
 
-        # ---------------------------------------------------------------------
-        # Attach real HYCOM time adapter when necessary.
-        # ---------------------------------------------------------------------
-
         if self.environment.time_adapter is None:
 
             self.environment.time_adapter = (
@@ -1804,7 +2061,7 @@ class NavigationRouteEngine:
         )
 
     # =========================================================================
-    # ROUTE RESULT CONVERSION
+    # RESULT CONVERSION
     # =========================================================================
 
     def _convert_route(
@@ -1835,7 +2092,9 @@ class NavigationRouteEngine:
                         "OceanSight 4D A*"
                     ),
                     "temporal_model": (
-                        "REAL INCOIS HYCOM source-time layers"
+                        "Piecewise exact INCOIS HYCOM "
+                        "source-time states with explicit "
+                        "boundary synchronization"
                     ),
                     "departure_vessel_time_utc": (
                         search.departure_vessel_time_utc
@@ -1853,6 +2112,32 @@ class NavigationRouteEngine:
         departure_time = parse_utc(
             request.departure_time_utc
         )
+
+        model_times = (
+            search.model_times_utc
+            or []
+        )
+
+        vessel_elapsed_values = (
+            search.vessel_elapsed_seconds
+            or []
+        )
+
+        if not model_times:
+
+            return NavigationResult(
+                status="unavailable",
+                mode=request.mode,
+                available=False,
+                message=(
+                    "A* returned a route without HYCOM "
+                    "model-time provenance."
+                ),
+                route=[],
+                metrics=NavigationMetrics(),
+                synthetic_data=False,
+                interpolation=False,
+            )
 
         route_points: list[
             NavigationRoutePoint
@@ -1882,37 +2167,9 @@ class NavigationRouteEngine:
         all_synthetic = False
         all_interpolation = False
 
-        model_times = (
-            search.model_times_utc
-            or []
-        )
-
-        if not model_times:
-
-            return NavigationResult(
-                status="unavailable",
-                mode=request.mode,
-                available=False,
-                message=(
-                    "A* returned a route without HYCOM "
-                    "model-time provenance."
-                ),
-                route=[],
-                metrics=NavigationMetrics(),
-                synthetic_data=False,
-                interpolation=False,
-                provenance={
-                    "routing_algorithm": (
-                        "OceanSight 4D A*"
-                    ),
-                },
-            )
-
         # ---------------------------------------------------------------------
-        # Vessel physical elapsed time is reconstructed from edge costs.
+        # CONVERT EACH SEARCH STATE
         # ---------------------------------------------------------------------
-
-        vessel_elapsed_seconds = 0.0
 
         for index, state in enumerate(
             search.route
@@ -1930,23 +2187,14 @@ class NavigationRouteEngine:
                     mode=request.mode,
                     available=False,
                     message=(
-                        "Route contained an invalid HYCOM "
-                        "source-time index."
+                        "Route contained an invalid "
+                        "HYCOM source-time index."
                     ),
                     route=[],
                     metrics=NavigationMetrics(),
                     synthetic_data=False,
                     interpolation=False,
-                    provenance={
-                        "routing_algorithm": (
-                            "OceanSight 4D A*"
-                        ),
-                    },
                 )
-
-            # -----------------------------------------------------------------
-            # REAL HYCOM MODEL TIME
-            # -----------------------------------------------------------------
 
             model_timestamp = (
                 model_times[
@@ -1977,7 +2225,6 @@ class NavigationRouteEngine:
 
             segment_distance_m = 0.0
             segment_cost = 0.0
-            segment_travel_seconds = 0.0
 
             vessel_speed = (
                 request.constraints
@@ -2050,7 +2297,47 @@ class NavigationRouteEngine:
                     hazard_penalty=0.0,
                 )
 
-                if not edge.traversable:
+                if edge.traversable:
+
+                    segment_cost = (
+                        edge.total_cost
+                    )
+
+                    segment_travel_seconds = (
+                        float(
+                            edge.travel_time_seconds
+                        )
+                    )
+
+                    # ---------------------------------------------------------
+                    # Spatial segment.
+                    # ---------------------------------------------------------
+
+                    if segment_distance_m > EPSILON:
+
+                        total_distance_m += (
+                            segment_distance_m
+                        )
+
+                        total_travel_seconds += (
+                            segment_travel_seconds
+                        )
+
+                    # ---------------------------------------------------------
+                    # Explicit model-boundary wait.
+                    #
+                    # Same spatial coordinates and a changed model index
+                    # means this transition represents the explicit wait
+                    # until the next real source timestamp.
+                    # ---------------------------------------------------------
+
+                    else:
+
+                        total_travel_seconds += (
+                            segment_travel_seconds
+                        )
+
+                else:
 
                     return NavigationResult(
                         status="unavailable",
@@ -2058,44 +2345,33 @@ class NavigationRouteEngine:
                         available=False,
                         message=(
                             "A reconstructed route segment "
-                            "was not physically traversable."
+                            "was not traversable."
                         ),
                         route=[],
                         metrics=NavigationMetrics(),
                         synthetic_data=False,
                         interpolation=False,
-                        provenance={
-                            "routing_algorithm": (
-                                "OceanSight 4D A*"
-                            ),
-                        },
                     )
 
-                segment_cost = (
-                    edge.total_cost
-                )
-
-                segment_travel_seconds = float(
-                    edge.travel_time_seconds
-                )
-
-                total_distance_m += (
-                    segment_distance_m
-                )
-
-                total_travel_seconds += (
-                    segment_travel_seconds
-                )
-
-                vessel_elapsed_seconds += (
-                    segment_travel_seconds
-                )
-
             # -----------------------------------------------------------------
-            # PHYSICAL VESSEL ARRIVAL TIME
-            #
-            # This is deliberately separate from model_timestamp above.
+            # PHYSICAL VESSEL TIME
             # -----------------------------------------------------------------
+
+            if index < len(
+                vessel_elapsed_values
+            ):
+
+                vessel_elapsed_seconds = (
+                    vessel_elapsed_values[
+                        index
+                    ]
+                )
+
+            else:
+
+                vessel_elapsed_seconds = (
+                    total_travel_seconds
+                )
 
             vessel_timestamp = (
                 departure_time
@@ -2113,7 +2389,7 @@ class NavigationRouteEngine:
             )
 
             # -----------------------------------------------------------------
-            # Current statistics.
+            # Current statistics
             # -----------------------------------------------------------------
 
             current_speed = (
@@ -2127,7 +2403,7 @@ class NavigationRouteEngine:
                 )
 
             # -----------------------------------------------------------------
-            # Provenance.
+            # Provenance
             # -----------------------------------------------------------------
 
             actual_source_time = (
@@ -2181,54 +2457,72 @@ class NavigationRouteEngine:
                 all_interpolation = True
 
             # -----------------------------------------------------------------
-            # Existing route-point API is preserved.
-            #
-            # time_utc remains the physical vessel arrival time.
-            # Exact HYCOM source times remain in source_times_utc and
-            # provenance.
+            # ROUTE POINT
             # -----------------------------------------------------------------
 
             route_points.append(
                 NavigationRoutePoint(
                     sequence=index,
+
                     latitude=(
                         state.latitude
                     ),
+
                     longitude=(
                         state.longitude
                     ),
+
                     depth_m=(
                         state.depth_m
                     ),
+
+                    # Backward-compatible physical vessel time.
                     time_utc=(
                         vessel_timestamp_utc
                     ),
+
+                    vessel_time_utc=(
+                        vessel_timestamp_utc
+                    ),
+
+                    model_time_utc=(
+                        model_timestamp
+                    ),
+
                     segment_distance_m=(
                         segment_distance_m
                     ),
+
                     cumulative_distance_m=(
                         total_distance_m
                     ),
+
                     vessel_speed_m_s=(
                         vessel_speed
                     ),
+
                     u_current_m_s=(
                         environment
                         .u_current_m_s
                     ),
+
                     v_current_m_s=(
                         environment
                         .v_current_m_s
                     ),
+
                     current_speed_m_s=(
                         environment
                         .current_speed_m_s
                     ),
+
                     current_direction_math_deg=(
                         environment
                         .current_direction_math_deg
                     ),
+
                     hazard_penalty=0.0,
+
                     segment_cost=(
                         segment_cost
                     ),
@@ -2257,7 +2551,7 @@ class NavigationRouteEngine:
             )
 
         # ---------------------------------------------------------------------
-        # Explicit temporal provenance.
+        # TEMPORAL PROVENANCE
         # ---------------------------------------------------------------------
 
         provenance: dict[str, Any] = {
@@ -2286,7 +2580,9 @@ class NavigationRouteEngine:
             ),
 
             "temporal_model": (
-                "REAL INCOIS HYCOM source-time layers"
+                "Piecewise exact INCOIS HYCOM "
+                "source-time states with explicit "
+                "model-boundary synchronization"
             ),
 
             "departure_vessel_time_utc": (
@@ -2311,10 +2607,32 @@ class NavigationRouteEngine:
                 "route_point_time_utc": (
                     "physical vessel arrival time"
                 ),
-                "environment_time_utc": (
-                    "exact INCOIS HYCOM source time"
+
+                "vessel_time_utc": (
+                    "physical vessel arrival time"
                 ),
+
+                "model_time_utc": (
+                    "exact INCOIS HYCOM source time "
+                    "associated with the environmental state"
+                ),
+
+                "model_state_policy": (
+                    "latest exact source time at or before "
+                    "physical vessel state; boundary changes "
+                    "occur only through explicit synchronization"
+                ),
+
+                "moving_edge_boundary_crossing": (
+                    "rejected"
+                ),
+
+                "model_boundary_waiting": (
+                    "explicit when allow_waiting=true"
+                ),
+
                 "interpolation": False,
+
                 "synthetic_data": False,
             },
         }
@@ -2325,51 +2643,67 @@ class NavigationRouteEngine:
             available=True,
             message=(
                 "4D A* route successfully calculated "
-                "using real environmental states and "
-                "real INCOIS HYCOM model-time layers."
+                "using real environmental states, "
+                "real INCOIS HYCOM source-time states, "
+                "and physically tracked vessel time."
             ),
+
             route=route_points,
+
             metrics=NavigationMetrics(
                 total_distance_m=(
                     total_distance_m
                 ),
+
                 total_distance_km=(
                     total_distance_m
                     / 1000.0
                 ),
+
                 travel_time_seconds=(
                     total_travel_seconds
                 ),
+
                 travel_time_hours=(
                     total_travel_seconds
                     / 3600.0
                 ),
+
                 estimated_fuel_units=None,
+
                 max_current_speed_m_s=(
                     maximum_current
                 ),
+
                 average_current_speed_m_s=(
                     average_current
                 ),
+
                 hazard_exposure=(
                     hazard_exposure
                 ),
             ),
+
             source_times_utc=(
                 source_times
             ),
+
             sources=(
                 sources
             ),
+
             datasets=(
                 datasets
             ),
+
             synthetic_data=(
                 all_synthetic
             ),
+
             interpolation=(
                 all_interpolation
             ),
+
             provenance=(
                 provenance
             ),
@@ -2385,9 +2719,6 @@ class NavigationRouteEngine:
     ) -> NavigationResult:
         """
         Calculate a navigation route.
-
-        Invalid requests are converted into structured NavigationResult
-        responses rather than leaking internal exceptions.
         """
 
         if (

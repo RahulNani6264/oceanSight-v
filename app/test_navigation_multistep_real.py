@@ -3,91 +3,87 @@ from __future__ import annotations
 
 """
 OceanSight-V
-Multi-Step REAL HYCOM 4D A* Integration Test
+REAL HYCOM 4D A* Boundary-Synchronization Test
 
 Purpose
 -------
-Verify that the navigation engine can move through multiple REAL INCOIS
-HYCOM model-time layers.
+This test verifies the temporal architecture of the navigation engine
+using REAL INCOIS HYCOM source states.
 
-This test specifically checks that:
+Required behavior:
 
-    time_index=0
-        -> first real HYCOM model time selected for the search
+1. Vessel time is continuous and physically accumulated.
+2. HYCOM model times come only from real INCOIS source timestamps.
+3. No synthetic timestamps are created.
+4. No interpolation is used.
+5. Model time never moves backward.
+6. A real HYCOM boundary can be crossed through an explicit
+   same-position synchronization/wait transition.
+7. Real bathymetry and current traversability remain enabled.
 
-    time_index=1
-        -> next real HYCOM model time
+Test design
+-----------
+The route is deliberately long and the vessel deliberately slow enough
+that reaching the destination before the first 6-hour HYCOM boundary is
+physically unlikely.
 
-    time_index=2
-        -> next real HYCOM model time
-
-and so on.
-
-Scientific requirements
------------------------
-- Real INCOIS HYCOM data only.
-- No synthetic data.
-- No interpolation.
-- No invented model timestamps.
-- Every route state must correspond to an actual source timestamp.
-- Multiple temporal layers must be traversed.
-- Physical travel time must remain within each model interval.
+The test stays within the real GEBCO coverage around the starting point.
 """
 
 from datetime import datetime, timezone
 
-from .navigation_astar import (
-    OceanSightAStar,
-)
-from .navigation_environment import (
-    NavigationEnvironment,
-)
+from .navigation_astar import OceanSightAStar
+from .navigation_environment import NavigationEnvironment
 from .navigation_models import (
     NavigationConstraints,
     NavigationRequest,
     NavigationWeights,
 )
-from .navigation_time import (
-    NavigationTimeAdapter,
-)
+from .navigation_time import NavigationTimeAdapter
 
 
 # =============================================================================
-# TEST CONSTANTS
+# TEST CONFIGURATION
 # =============================================================================
 
 START_LATITUDE = -8.20
 START_LONGITUDE = 68.20
 
-DESTINATION_LATITUDE = -8.10
-DESTINATION_LONGITUDE = 68.30
+# Keep the route inside the GEBCO region around the test point.
+#
+# The existing downloaded GEBCO coverage includes approximately:
+#
+#     latitude  -8.3979 -> -7.9021
+#     longitude  67.7521 -> 68.4979
+#
+# Therefore this destination remains inside that region.
+DESTINATION_LATITUDE = -7.925
+DESTINATION_LONGITUDE = 68.20
 
 START_DEPTH_M = 100.0
 DESTINATION_DEPTH_M = 100.0
 
-DEPARTURE_TIME_UTC = (
-    "2026-09-10T06:00:00Z"
-)
+DEPARTURE_TIME_UTC = "2026-09-10T06:00:00Z"
 
-VESSEL_SPEED_M_S = 10.0
+# Deliberately slow, but not so slow that normal current effects make
+# essentially every edge impossible.
+VESSEL_SPEED_M_S = 1.2
 
-# Deliberately keep this value different from the HYCOM source cadence.
-#
-# This proves that A* is no longer constructing model times from
-# request.time_step_minutes.
+# This is intentionally NOT interpreted as the HYCOM cadence.
 CONFIGURED_TIME_STEP_MINUTES = 60
 
-LATITUDE_STEP_DEG = 0.05
+# Spatial resolution.
+LATITUDE_STEP_DEG = 0.025
 LONGITUDE_STEP_DEG = 0.05
 DEPTH_STEP_M = 50.0
 
 MAX_ROUTE_DURATION_HOURS = 48.0
+MAX_SEARCH_NODES = 250_000
 
 
 # =============================================================================
-# ASSERTION HELPERS
+# HELPERS
 # =============================================================================
-
 
 def assert_true(
     condition: bool,
@@ -95,73 +91,60 @@ def assert_true(
 ) -> None:
 
     if not condition:
-        raise AssertionError(
-            message
+        raise AssertionError(message)
+
+
+def parse_test_utc(
+    value: str,
+) -> datetime:
+
+    text = str(value).strip()
+
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+
+    parsed = datetime.fromisoformat(text)
+
+    if parsed.tzinfo is None:
+        raise ValueError(
+            "Timestamp must include an explicit timezone."
         )
+
+    return parsed.astimezone(timezone.utc)
 
 
 # =============================================================================
 # MAIN TEST
 # =============================================================================
 
-
 def main() -> None:
 
-    print(
-        "=" * 80
-    )
-
-    print(
-        "OCEANSIGHT-V"
-    )
-
-    print(
-        "MULTI-STEP REAL HYCOM 4D A* TEST"
-    )
-
-    print(
-        "=" * 80
-    )
+    print("=" * 80)
+    print("OCEANSIGHT-V")
+    print("REAL HYCOM 4D A* BOUNDARY-SYNCHRONIZATION TEST")
+    print("=" * 80)
 
     print()
-
-    print(
-        "Start:",
-        START_LATITUDE,
-        START_LONGITUDE,
-    )
-
+    print("Start:", START_LATITUDE, START_LONGITUDE)
     print(
         "Destination:",
         DESTINATION_LATITUDE,
         DESTINATION_LONGITUDE,
     )
-
-    print(
-        "Departure:",
-        DEPARTURE_TIME_UTC,
-    )
-
-    print(
-        "Vessel speed:",
-        VESSEL_SPEED_M_S,
-        "m/s",
-    )
-
+    print("Depth:", START_DEPTH_M, "m")
+    print("Departure:", DEPARTURE_TIME_UTC)
+    print("Vessel speed:", VESSEL_SPEED_M_S, "m/s")
     print(
         "Configured time_step_minutes:",
         CONFIGURED_TIME_STEP_MINUTES,
     )
 
+    # =========================================================================
+    # REAL HYCOM SOURCE-TIME CATALOG
+    # =========================================================================
+
     print()
-
-    # =========================================================================
-    # DISCOVER REAL HYCOM TIME AXIS
-    # =========================================================================
-
-    print(
-        "Discovering REAL INCOIS HYCOM source times..."
-    )
+    print("Discovering REAL INCOIS HYCOM source times...")
 
     time_adapter = (
         NavigationTimeAdapter.from_live_incois()
@@ -174,8 +157,8 @@ def main() -> None:
     assert_true(
         len(source_times) >= 3,
         (
-            "Test requires at least three real HYCOM "
-            "source timestamps."
+            "Expected at least three real INCOIS HYCOM "
+            f"source timestamps; found {len(source_times)}."
         ),
     )
 
@@ -184,34 +167,33 @@ def main() -> None:
         len(source_times),
     )
 
-    print()
-
     # =========================================================================
-    # RESOLVE START MODEL TIME
+    # RESOLVE DEPARTURE
     # =========================================================================
 
-    resolved = (
+    resolved_start = (
         time_adapter.next_valid(
             DEPARTURE_TIME_UTC
         )
     )
 
     assert_true(
-        resolved is not None,
+        resolved_start is not None,
         (
-            "Unable to resolve vessel departure "
-            "against real HYCOM source times."
+            "Could not resolve vessel departure "
+            "against the real HYCOM source-time catalog."
         ),
     )
 
-    assert resolved is not None
+    assert resolved_start is not None
 
     starting_model_time = (
-        resolved.model_time_utc
+        resolved_start.model_time_utc
     )
 
+    print()
     print(
-        "Vessel departure time:",
+        "Vessel departure:",
         DEPARTURE_TIME_UTC,
     )
 
@@ -220,15 +202,63 @@ def main() -> None:
         starting_model_time,
     )
 
-    print(
-        "Exact departure/model match:",
-        resolved.exact_model_time,
+    # =========================================================================
+    # NEXT REAL HYCOM BOUNDARY
+    # =========================================================================
+
+    next_model = (
+        time_adapter.next_model_time(
+            starting_model_time
+        )
     )
 
-    print()
+    assert_true(
+        next_model is not None,
+        (
+            "Could not find the next real HYCOM "
+            "source-time boundary."
+        ),
+    )
+
+    assert next_model is not None
+
+    next_boundary_time = (
+        next_model.model_time_utc
+    )
+
+    starting_dt = parse_test_utc(
+        starting_model_time
+    )
+
+    next_boundary_dt = parse_test_utc(
+        next_boundary_time
+    )
+
+    boundary_interval_seconds = (
+        next_boundary_dt - starting_dt
+    ).total_seconds()
+    
+    assert_true(
+        boundary_interval_seconds > 0.0,
+        (
+            "HYCOM boundary interval must "
+            "be positive."
+        ),
+    )
+
+    print(
+        "Next HYCOM boundary:",
+        next_boundary_time,
+    )
+
+    print(
+        "Boundary interval:",
+        boundary_interval_seconds,
+        "seconds",
+    )
 
     # =========================================================================
-    # BUILD REAL ENVIRONMENT
+    # REAL ENVIRONMENT
     # =========================================================================
 
     environment = NavigationEnvironment(
@@ -236,20 +266,14 @@ def main() -> None:
     )
 
     # =========================================================================
-    # BUILD ASTAR
+    # ASTAR
     # =========================================================================
 
     astar = OceanSightAStar(
         environment,
-        latitude_step_deg=(
-            LATITUDE_STEP_DEG
-        ),
-        longitude_step_deg=(
-            LONGITUDE_STEP_DEG
-        ),
-        depth_step_m=(
-            DEPTH_STEP_M
-        ),
+        latitude_step_deg=LATITUDE_STEP_DEG,
+        longitude_step_deg=LONGITUDE_STEP_DEG,
+        depth_step_m=DEPTH_STEP_M,
     )
 
     # =========================================================================
@@ -262,41 +286,48 @@ def main() -> None:
             "longitude": START_LONGITUDE,
             "depth_m": START_DEPTH_M,
         },
+
         destination={
             "latitude": DESTINATION_LATITUDE,
             "longitude": DESTINATION_LONGITUDE,
             "depth_m": DESTINATION_DEPTH_M,
         },
-        departure_time_utc=(
-            DEPARTURE_TIME_UTC
-        ),
+
+        departure_time_utc=DEPARTURE_TIME_UTC,
+
+        minimum_arrival_time_utc=next_boundary_time,
+
         mode="logistics",
+
         constraints=NavigationConstraints(
-            vessel_speed_m_s=(
-                VESSEL_SPEED_M_S
-            ),
+            vessel_speed_m_s=VESSEL_SPEED_M_S,
             min_depth_m=0.0,
             max_depth_m=5000.0,
             max_route_duration_hours=(
                 MAX_ROUTE_DURATION_HOURS
             ),
         ),
+
         weights=NavigationWeights(),
+
+        # Deliberately not equal to HYCOM source cadence.
         time_step_minutes=(
             CONFIGURED_TIME_STEP_MINUTES
         ),
-        allow_waiting=False,
-        max_search_nodes=(
-            250_000
-        ),
+
+        # Explicit synchronization is permitted.
+        allow_waiting=True,
+
+        max_search_nodes=MAX_SEARCH_NODES,
     )
 
     # =========================================================================
-    # SEARCH
+    # RUN A*
     # =========================================================================
 
+    print()
     print(
-        "Running REAL HYCOM multi-step A*..."
+        "Running REAL HYCOM boundary-aware A*..."
     )
 
     search = astar.search(
@@ -304,14 +335,8 @@ def main() -> None:
     )
 
     print()
-
-    print(
-        "SEARCH RESULT"
-    )
-
-    print(
-        "-" * 80
-    )
+    print("SEARCH RESULT")
+    print("-" * 80)
 
     print(
         "Found:",
@@ -335,45 +360,26 @@ def main() -> None:
 
     print(
         "Route length:",
-        len(
-            search.route
-        ),
+        len(search.route),
     )
-
-    print()
 
     assert_true(
         search.found,
         (
-            "Multi-step real HYCOM-backed A* "
-            "failed to find a route."
-        ),
-    )
-
-    # =========================================================================
-    # BASIC ROUTE REQUIREMENTS
-    # =========================================================================
-
-    assert_true(
-        len(
-            search.route
-        ) >= 3,
-        (
-            "Multi-step test requires at least "
-            "3 route states."
+            "Boundary-aware real HYCOM A* failed "
+            "to find a route."
         ),
     )
 
     assert_true(
-        search.route[0].time_index == 0,
+        len(search.route) >= 3,
         (
-            "Route must begin at local "
-            "time_index 0."
+            "Expected multiple route states."
         ),
     )
 
     # =========================================================================
-    # MODEL TIME PROVENANCE
+    # MODEL-TIME PROVENANCE
     # =========================================================================
 
     model_times = (
@@ -384,8 +390,8 @@ def main() -> None:
     assert_true(
         len(model_times) >= 3,
         (
-            "A* result must contain at least "
-            "three model-time layers."
+            "A* did not return enough real "
+            "HYCOM model timestamps."
         ),
     )
 
@@ -393,28 +399,21 @@ def main() -> None:
         search.starting_model_time_utc
         == starting_model_time,
         (
-            "A* starting model time does not match "
-            "the resolved real HYCOM model time."
+            "A* starting model time does not "
+            "match the real HYCOM source time."
         ),
     )
 
     # =========================================================================
-    # CHECK TEMPORAL PROGRESSION
+    # MODEL TIME ORDER
     # =========================================================================
 
-    print(
-        "ROUTE TEMPORAL CHECK"
-    )
-
-    print(
-        "-" * 80
-    )
+    print()
+    print("ROUTE TEMPORAL CHECK")
+    print("-" * 80)
 
     previous_time_index = None
-
-    used_time_indices: list[
-        int
-    ] = []
+    used_model_indices: list[int] = []
 
     for index, state in enumerate(
         search.route
@@ -428,28 +427,24 @@ def main() -> None:
             current_index >= 0,
             (
                 f"Route state {index} has "
-                "negative time_index."
+                "negative model-time index."
             ),
         )
 
         assert_true(
-            current_index
-            < len(model_times),
+            current_index < len(model_times),
             (
                 f"Route state {index} references "
-                "an invalid HYCOM model-time index."
+                "an invalid model-time index."
             ),
         )
 
         if previous_time_index is not None:
 
             assert_true(
-                current_index
-                == previous_time_index + 1,
+                current_index >= previous_time_index,
                 (
-                    "Model-time layers must advance "
-                    "one real HYCOM source timestamp "
-                    "at a time."
+                    "Model-time index moved backward."
                 ),
             )
 
@@ -465,7 +460,7 @@ def main() -> None:
             f" -> model_time={model_time}"
         )
 
-        used_time_indices.append(
+        used_model_indices.append(
             current_index
         )
 
@@ -473,55 +468,207 @@ def main() -> None:
             current_index
         )
 
-    # =========================================================================
-    # REQUIRE MULTIPLE MODEL TIMES
-    # =========================================================================
-
-    unique_used_indices = list(
+    unique_model_indices = list(
         dict.fromkeys(
-            used_time_indices
+            used_model_indices
         )
     )
 
     assert_true(
-        len(
-            unique_used_indices
-        ) >= 2,
+        len(unique_model_indices) >= 2,
         (
-            "Route must traverse multiple "
-            "HYCOM model-time layers."
+            "The route did not cross a real "
+            "HYCOM model-time boundary."
         ),
     )
 
     # =========================================================================
-    # VERIFY ACTUAL MODEL TIME VALUES
+    # EXPLICIT SYNCHRONIZATION
     # =========================================================================
 
     print()
+    print("MODEL-TIME SYNCHRONIZATION CHECK")
+    print("-" * 80)
 
+    synchronization_found = False
+
+    for previous, current in zip(
+        search.route,
+        search.route[1:],
+    ):
+
+        if (
+            current.time_index
+            <= previous.time_index
+        ):
+            continue
+
+        same_position = (
+            abs(
+                current.latitude
+                - previous.latitude
+            ) <= 1.0e-12
+            and
+            abs(
+                current.longitude
+                - previous.longitude
+            ) <= 1.0e-12
+            and
+            abs(
+                current.depth_m
+                - previous.depth_m
+            ) <= 1.0e-12
+        )
+
+        if same_position:
+
+            synchronization_found = True
+
+            previous_model_time = (
+                model_times[
+                    previous.time_index
+                ]
+            )
+
+            current_model_time = (
+                model_times[
+                    current.time_index
+                ]
+            )
+
+            print(
+                "EXPLICIT MODEL-TIME SYNCHRONIZATION FOUND"
+            )
+
+            print(
+                "  Location:",
+                current.latitude,
+                current.longitude,
+            )
+
+            print(
+                "  Previous model time:",
+                previous_model_time,
+            )
+
+            print(
+                "  Next model time:",
+                current_model_time,
+            )
+
+            break
+
+    assert_true(
+        synchronization_found,
+        (
+            "Model-time changed without an explicit "
+            "same-position synchronization transition."
+        ),
+    )
+
+    # =========================================================================
+    # PHYSICAL VESSEL TIME
+    # =========================================================================
+
+    print()
+    print("VESSEL TIME CHECK")
+    print("-" * 80)
+
+    vessel_elapsed = (
+        search.vessel_elapsed_seconds
+        or []
+    )
+
+    assert_true(
+        len(vessel_elapsed)
+        == len(search.route),
+        (
+            "A* must provide one physical vessel "
+            "elapsed-time value per route state."
+        ),
+    )
+
+    previous_elapsed = None
+
+    for index, elapsed_seconds in enumerate(
+        vessel_elapsed
+    ):
+
+        assert_true(
+            elapsed_seconds >= 0.0,
+            (
+                f"Route state {index} contains "
+                "negative vessel elapsed time."
+            ),
+        )
+
+        if previous_elapsed is not None:
+
+            assert_true(
+                elapsed_seconds >= previous_elapsed,
+                (
+                    "Physical vessel time moved backward."
+                ),
+            )
+
+        print(
+            f"  route[{index}]"
+            f" -> vessel_elapsed="
+            f"{elapsed_seconds:.3f}s"
+        )
+
+        previous_elapsed = (
+            elapsed_seconds
+        )
+
+    final_vessel_elapsed = (
+        vessel_elapsed[-1]
+    )
+
+    print()
     print(
-        "SOURCE-TIME INTEGRITY CHECK"
+        "Final vessel elapsed time:",
+        final_vessel_elapsed,
+        "seconds",
     )
 
     print(
-        "-" * 80
+        "Final vessel elapsed time:",
+        final_vessel_elapsed / 3600.0,
+        "hours",
     )
+
+    assert_true(
+        final_vessel_elapsed
+        > boundary_interval_seconds,
+        (
+            "Final physical vessel time did not "
+            "cross the first real HYCOM boundary."
+        ),
+    )
+
+    # =========================================================================
+    # REAL HYCOM SOURCE-TIME CHECK
+    # =========================================================================
+
+    print()
+    print("SOURCE-TIME INTEGRITY CHECK")
+    print("-" * 80)
 
     for state in search.route:
 
-        source_time = model_times[
-            state.time_index
-        ]
-
-        # The timestamp must exactly match one of the REAL discovered
-        # INCOIS source timestamps.
+        source_time = (
+            model_times[
+                state.time_index
+            ]
+        )
 
         assert_true(
             source_time in source_times,
             (
-                "A* produced a model timestamp that "
-                "is not present in the real HYCOM "
-                "source-time catalog."
+                "Route references a model time "
+                "that is not present in the real "
+                "INCOIS HYCOM source catalog."
             ),
         )
 
@@ -531,63 +678,26 @@ def main() -> None:
         )
 
     # =========================================================================
-    # VERIFY REQUEST TIME IS NOT USED AS FAKE MODEL TIME
-    # =========================================================================
-
-    if (
-        DEPARTURE_TIME_UTC
-        != starting_model_time
-    ):
-
-        assert_true(
-            DEPARTURE_TIME_UTC
-            not in [
-                model_times[
-                    state.time_index
-                ]
-                for state in search.route
-            ],
-            (
-                "The vessel departure time was incorrectly "
-                "introduced as a HYCOM model timestamp."
-            ),
-        )
-
-    # =========================================================================
-    # VERIFY NO SYNTHETIC / INTERPOLATED DATA
+    # SCIENTIFIC INTEGRITY
     # =========================================================================
 
     print()
-
-    print(
-        "SCIENTIFIC INTEGRITY CHECK"
-    )
-
-    print(
-        "-" * 80
-    )
+    print("SCIENTIFIC INTEGRITY CHECK")
+    print("-" * 80)
 
     for state in search.route:
 
-        model_time = model_times[
-            state.time_index
-        ]
+        model_time = (
+            model_times[
+                state.time_index
+            ]
+        )
 
-        sampled = (
-            environment.sample(
-                latitude=(
-                    state.latitude
-                ),
-                longitude=(
-                    state.longitude
-                ),
-                depth_m=(
-                    state.depth_m
-                ),
-                time_utc=(
-                    model_time
-                ),
-            )
+        sampled = environment.sample(
+            latitude=state.latitude,
+            longitude=state.longitude,
+            depth_m=state.depth_m,
+            time_utc=model_time,
         )
 
         environment.validate_scientific_integrity(
@@ -596,27 +706,20 @@ def main() -> None:
 
         assert_true(
             sampled.synthetic_data is False,
-            (
-                "Synthetic data detected in "
-                "real HYCOM route."
-            ),
+            "Synthetic data detected.",
         )
 
         assert_true(
             sampled.interpolation is False,
-            (
-                "Interpolation detected in "
-                "real HYCOM route."
-            ),
+            "Interpolation detected.",
         )
 
         assert_true(
             sampled.actual_time_utc
             == model_time,
             (
-                "Environment actual source time "
-                "does not equal the requested real "
-                "HYCOM model time."
+                "Environmental source time does not "
+                "match the exact HYCOM model time."
             ),
         )
 
@@ -628,133 +731,46 @@ def main() -> None:
         )
 
     # =========================================================================
-    # VERIFY MODEL INTERVALS
+    # FINAL ROUTE
     # =========================================================================
 
     print()
-
-    print(
-        "MODEL INTERVAL CHECK"
-    )
-
-    print(
-        "-" * 80
-    )
-
-    for index in range(
-        len(
-            unique_used_indices
-        )
-        - 1
-    ):
-
-        current_index = (
-            unique_used_indices[
-                index
-            ]
-        )
-
-        next_index = (
-            unique_used_indices[
-                index + 1
-            ]
-        )
-
-        current_dt = datetime.fromisoformat(
-            model_times[
-                current_index
-            ].replace(
-                "Z",
-                "+00:00",
-            )
-        ).astimezone(
-            timezone.utc
-        )
-
-        next_dt = datetime.fromisoformat(
-            model_times[
-                next_index
-            ].replace(
-                "Z",
-                "+00:00",
-            )
-        ).astimezone(
-            timezone.utc
-        )
-
-        interval_seconds = (
-            next_dt
-            - current_dt
-        ).total_seconds()
-
-        assert_true(
-            interval_seconds > 0.0,
-            (
-                "HYCOM source-time sequence "
-                "must be strictly increasing."
-            ),
-        )
-
-        print(
-            "  ",
-            model_times[
-                current_index
-            ],
-            "->",
-            model_times[
-                next_index
-            ],
-            "=",
-            interval_seconds,
-            "seconds",
-        )
-
-    # =========================================================================
-    # FINAL REPORT
-    # =========================================================================
-
-    print()
-
-    print(
-        "ROUTE"
-    )
-
-    print(
-        "-" * 80
-    )
+    print("FINAL ROUTE")
+    print("-" * 80)
 
     for index, state in enumerate(
         search.route
     ):
 
-        model_time = model_times[
-            state.time_index
-        ]
+        model_time = (
+            model_times[
+                state.time_index
+            ]
+        )
+
+        elapsed = (
+            vessel_elapsed[
+                index
+            ]
+        )
 
         print(
-            "  ",
-            index,
-            "lat=",
-            f"{state.latitude:.6f}",
-            "lon=",
-            f"{state.longitude:.6f}",
-            "depth=",
-            f"{state.depth_m:.1f}m",
-            "time_index=",
-            state.time_index,
-            "model_time=",
-            model_time,
+            f"  {index}"
+            f" lat={state.latitude:.6f}"
+            f" lon={state.longitude:.6f}"
+            f" depth={state.depth_m:.1f}m"
+            f" time_index={state.time_index}"
+            f" model_time={model_time}"
+            f" vessel_elapsed={elapsed:.1f}s"
         )
 
     print()
-
     print(
-        "REAL HYCOM MULTI-STEP 4D A* TEST: PASS"
+        "REAL HYCOM 4D A* "
+        "BOUNDARY-SYNCHRONIZATION TEST: PASS"
     )
 
-    print(
-        "=" * 80
-    )
+    print("=" * 80)
 
 
 if __name__ == "__main__":

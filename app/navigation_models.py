@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 """
@@ -13,6 +14,7 @@ Design goals:
     - No synthetic scientific data.
     - No hidden interpolation.
     - No pressure/depth ambiguity.
+    - Explicit separation of vessel time and model source time.
 
 Scientific conventions:
     latitude/longitude -> degrees
@@ -20,6 +22,18 @@ Scientific conventions:
     time -> ISO-8601 UTC
     current U/V -> meters per second
     vessel speed -> meters per second
+
+Temporal conventions:
+    vessel_time_utc:
+        Physical vessel arrival/departure timeline.
+
+    model_time_utc:
+        Exact real INCOIS HYCOM source TIME used to obtain the
+        environmental state.
+
+    time_utc:
+        Backward-compatible public route timestamp. It represents
+        the physical vessel time.
 
 Important:
     These models describe the navigation contract only.
@@ -54,6 +68,7 @@ RoutingStatus = Literal[
 # WAYPOINT
 # =============================================================================
 
+
 class NavigationWaypoint(BaseModel):
     """
     A geographic waypoint.
@@ -86,6 +101,7 @@ class NavigationWaypoint(BaseModel):
 # =============================================================================
 # NAVIGATION CONSTRAINTS
 # =============================================================================
+
 
 class NavigationConstraints(BaseModel):
     """
@@ -130,6 +146,7 @@ class NavigationConstraints(BaseModel):
 # ROUTING WEIGHTS
 # =============================================================================
 
+
 class NavigationWeights(BaseModel):
     """
     Relative cost weights for the 4D routing engine.
@@ -168,6 +185,7 @@ class NavigationWeights(BaseModel):
 # ROUTING REQUEST
 # =============================================================================
 
+
 class NavigationRequest(BaseModel):
     """
     Common navigation request.
@@ -182,6 +200,14 @@ class NavigationRequest(BaseModel):
     destination: NavigationWaypoint
 
     departure_time_utc: str
+
+    minimum_arrival_time_utc: str | None = Field(
+        default=None,
+        description=(
+            "Optional earliest physical vessel arrival time in UTC. "
+            "When provided, the route cannot finish before this time."
+        ),
+    )
 
     constraints: NavigationConstraints
 
@@ -209,6 +235,12 @@ class NavigationRequest(BaseModel):
         default=60,
         ge=1,
         le=1_440,
+        description=(
+            "Legacy/configuration field retained for API compatibility. "
+            "The A* environmental timeline uses actual INCOIS HYCOM "
+            "source-time intervals rather than inventing timestamps "
+            "from this value."
+        ),
     )
 
     @field_validator("departure_time_utc")
@@ -224,7 +256,9 @@ class NavigationRequest(BaseModel):
         this model remains reusable.
         """
 
-        value = str(value).strip()
+        value = str(
+            value
+        ).strip()
 
         if not value:
             raise ValueError(
@@ -242,10 +276,38 @@ class NavigationRequest(BaseModel):
 
         return value
 
+    @field_validator("minimum_arrival_time_utc")
+    @classmethod
+    def validate_minimum_arrival_time(
+        cls,
+        value: str | None,
+    ) -> str | None:
+        """Require an explicit timezone when supplied."""
+
+        if value is None:
+            return None
+
+        value = str(value).strip()
+
+        if not value:
+            return None
+
+        if not (
+            value.endswith("Z")
+            or "+" in value
+            or value.count("-") >= 3
+        ):
+            raise ValueError(
+                "minimum_arrival_time_utc must include an explicit timezone."
+            )
+
+        return value
+
 
 # =============================================================================
 # ROUTE POINT
 # =============================================================================
+
 
 class NavigationRoutePoint(BaseModel):
     """
@@ -253,6 +315,19 @@ class NavigationRoutePoint(BaseModel):
 
     Environmental values are optional because a valid route should still
     be representable when a particular field is unavailable.
+
+    Temporal semantics
+    ------------------
+    `vessel_time_utc`
+        Physical vessel arrival time for this route point.
+
+    `model_time_utc`
+        Exact real INCOIS HYCOM source time used for environmental
+        information at this route point.
+
+    `time_utc`
+        Backward-compatible alias/value representing the physical vessel
+        arrival time. Existing clients can continue using this field.
     """
 
     sequence: int = Field(
@@ -277,7 +352,35 @@ class NavigationRoutePoint(BaseModel):
         ge=0.0,
     )
 
-    time_utc: str
+    # -------------------------------------------------------------------------
+    # BACKWARD-COMPATIBLE TIME FIELD
+    # -------------------------------------------------------------------------
+
+    time_utc: str = Field(
+        ...,
+        description=(
+            "Backward-compatible physical vessel arrival time in UTC."
+        ),
+    )
+
+    # -------------------------------------------------------------------------
+    # EXPLICIT TEMPORAL FIELDS
+    # -------------------------------------------------------------------------
+
+    vessel_time_utc: str | None = Field(
+        default=None,
+        description=(
+            "Physical vessel arrival time for this route point."
+        ),
+    )
+
+    model_time_utc: str | None = Field(
+        default=None,
+        description=(
+            "Exact real INCOIS HYCOM source time used for the "
+            "environmental state at this route point."
+        ),
+    )
 
     segment_distance_m: float = Field(
         default=0.0,
@@ -307,6 +410,7 @@ class NavigationRoutePoint(BaseModel):
 # =============================================================================
 # ROUTE METRICS
 # =============================================================================
+
 
 class NavigationMetrics(BaseModel):
     """
@@ -361,6 +465,7 @@ class NavigationMetrics(BaseModel):
 # ROUTE RESULT
 # =============================================================================
 
+
 class NavigationResult(BaseModel):
     """
     Canonical response from the navigation engine.
@@ -402,6 +507,8 @@ class NavigationResult(BaseModel):
             "current": "m/s",
             "distance": "m",
             "time": "UTC",
+            "vessel_time": "UTC",
+            "model_time": "UTC",
         }
     )
 
@@ -412,3 +519,4 @@ class NavigationResult(BaseModel):
     provenance: dict[str, object] = Field(
         default_factory=dict
     )
+

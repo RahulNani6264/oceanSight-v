@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 """
@@ -6,9 +7,18 @@ Controlled functional test for OceanSight-V 4D A*.
 This uses a deterministic TEST ENVIRONMENT ONLY.
 
 It does not represent scientific ocean observations.
+
 It exists solely to verify:
     start -> neighbors -> costs -> A* -> goal -> route reconstruction
+
+Temporal contract:
+    - time_index starts at 0.
+    - time_index never moves backward.
+    - time_index may remain unchanged while physical vessel time is still
+      inside the same HYCOM-model state interval.
+    - A* must not require one model-time increment per spatial edge.
 """
+
 
 from app.navigation_astar import (
     OceanSightAStar,
@@ -25,6 +35,11 @@ from app.navigation_models import (
 )
 
 
+# =============================================================================
+# CONTROLLED ENVIRONMENT
+# =============================================================================
+
+
 class ControlledNavigationEnvironment(
     NavigationEnvironment
 ):
@@ -32,6 +47,8 @@ class ControlledNavigationEnvironment(
     Deterministic in-memory environment for algorithm testing.
 
     Every valid state gets the same non-zero current.
+
+    No real scientific data is used here.
     """
 
     def sample(
@@ -91,13 +108,21 @@ class ControlledNavigationEnvironment(
 
             provenance={
                 "test_fixture": True,
+                "scientific_data": False,
             },
         )
 
 
+# =============================================================================
+# MAIN TEST
+# =============================================================================
+
+
 def main() -> None:
 
-    environment = ControlledNavigationEnvironment()
+    environment = (
+        ControlledNavigationEnvironment()
+    )
 
     engine = OceanSightAStar(
         environment,
@@ -151,73 +176,261 @@ def main() -> None:
 
         max_search_nodes=100,
 
+        # Kept intentionally for API compatibility.
+        #
+        # The corrected A* temporal model does NOT use this value to
+        # invent environmental timestamps.
         time_step_minutes=60,
     )
 
-    result = engine.search(request)
+    result = engine.search(
+        request
+    )
 
-    print("=" * 72)
-    print("OCEANSIGHT-V CONTROLLED 4D A* TEST")
-    print("=" * 72)
+    print(
+        "=" * 72
+    )
 
-    print("Found:", result.found)
-    print("Message:", result.message)
-    print("Expanded nodes:", result.expanded_nodes)
-    print("Generated nodes:", result.generated_nodes)
-    print("Route length:", len(result.route))
+    print(
+        "OCEANSIGHT-V CONTROLLED 4D A* TEST"
+    )
+
+    print(
+        "=" * 72
+    )
+
+    print(
+        "Found:",
+        result.found,
+    )
+
+    print(
+        "Message:",
+        result.message,
+    )
+
+    print(
+        "Expanded nodes:",
+        result.expanded_nodes,
+    )
+
+    print(
+        "Generated nodes:",
+        result.generated_nodes,
+    )
+
+    print(
+        "Route length:",
+        len(
+            result.route
+        ),
+    )
 
     if not result.found:
+
         raise AssertionError(
             "Controlled A* failed to find the expected route."
         )
 
-    if len(result.route) < 2:
+    if len(
+        result.route
+    ) < 2:
+
         raise AssertionError(
             "A* returned a route with insufficient states."
         )
 
-    start = result.route[0]
-    goal = result.route[-1]
+    # =========================================================================
+    # START VALIDATION
+    # =========================================================================
+
+    start = result.route[
+        0
+    ]
 
     if (
-        abs(start.latitude + 8.20) > 1e-9
-        or abs(start.longitude - 68.20) > 1e-9
+        abs(
+            start.latitude
+            + 8.20
+        )
+        > 1e-9
+        or abs(
+            start.longitude
+            - 68.20
+        )
+        > 1e-9
     ):
+
         raise AssertionError(
             "Route does not begin at the requested start."
         )
 
     if (
-        abs(goal.latitude + 8.15) > 0.05
-        or abs(goal.longitude - 68.25) > 0.05
-    ):
-        raise AssertionError(
-            "Route does not reach the requested destination area."
+        abs(
+            start.depth_m
+            - 100.0
         )
+        > 1e-9
+    ):
+
+        raise AssertionError(
+            "Route does not begin at the requested depth."
+        )
+
+    # =========================================================================
+    # GOAL VALIDATION
+    # =========================================================================
+
+    goal = result.route[
+        -1
+    ]
+
+    if (
+        abs(
+            goal.latitude
+            + 8.15
+        )
+        > 1e-9
+        or abs(
+            goal.longitude
+            - 68.25
+        )
+        > 1e-9
+    ):
+
+        raise AssertionError(
+            "Route does not reach the requested destination."
+        )
+
+    if (
+        abs(
+            goal.depth_m
+            - 100.0
+        )
+        > 1e-9
+    ):
+
+        raise AssertionError(
+            "Route does not reach the requested destination depth."
+        )
+
+    # =========================================================================
+    # TIME-INDEX VALIDATION
+    # =========================================================================
 
     time_indices = [
         state.time_index
         for state in result.route
     ]
 
-    if time_indices[0] != 0:
+    if time_indices[
+        0
+    ] != 0:
+
         raise AssertionError(
             "Route must begin at time_index 0."
         )
 
+    # -------------------------------------------------------------------------
+    # Corrected temporal contract:
+    #
+    # time_index may remain unchanged when several physical vessel moves
+    # occur within the same environmental/model-time state.
+    #
+    # It must NEVER move backward.
+    # -------------------------------------------------------------------------
+
     for previous, current in zip(
         time_indices,
-        time_indices[1:],
+        time_indices[
+            1:
+        ],
     ):
-        if current <= previous:
+
+        if current < previous:
+
             raise AssertionError(
-                "4D route time indices must increase."
+                "4D route time indices must never move backward."
             )
 
+    # =========================================================================
+    # VERIFY THE NEW TEMPORAL SEMANTICS EXPLICITLY
+    # =========================================================================
+
+    if len(
+        set(
+            time_indices
+        )
+    ) == 1:
+
+        print()
+        print(
+            "Temporal note:"
+        )
+
+        print(
+            "  All controlled route points remain in "
+            "the same model-time layer."
+        )
+
+        print(
+            "  This is valid because physical vessel travel "
+            "is shorter than a model-state interval."
+        )
+
+    else:
+
+        print()
+        print(
+            "Temporal note:"
+        )
+
+        print(
+            "  Route crosses multiple model-time layers."
+        )
+
+    # =========================================================================
+    # VERIFY ROUTE IS ACTUALLY SPATIAL
+    # =========================================================================
+
+    first = result.route[
+        0
+    ]
+
+    last = result.route[
+        -1
+    ]
+
+    spatially_moved = (
+        abs(
+            last.latitude
+            - first.latitude
+        )
+        > 1e-9
+        or abs(
+            last.longitude
+            - first.longitude
+        )
+        > 1e-9
+    )
+
+    if not spatially_moved:
+
+        raise AssertionError(
+            "Controlled route did not move spatially."
+        )
+
+    # =========================================================================
+    # PRINT ROUTE
+    # =========================================================================
+
     print()
-    print("Route:")
+    print(
+        "Route:"
+    )
 
     for state in result.route:
+
         print(
             "  "
             f"lat={state.latitude:.5f}, "
@@ -226,10 +439,21 @@ def main() -> None:
             f"time_index={state.time_index}"
         )
 
+    # =========================================================================
+    # FINAL PASS
+    # =========================================================================
+
     print()
-    print("CONTROLLED 4D A* TEST: PASS")
-    print("=" * 72)
+    print(
+        "CONTROLLED 4D A* TEST: PASS"
+    )
+
+    print(
+        "=" * 72
+    )
 
 
 if __name__ == "__main__":
+
     main()
+
