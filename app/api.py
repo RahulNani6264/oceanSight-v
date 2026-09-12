@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import json
@@ -11,6 +12,15 @@ from .argo_live_manager import ArgoLiveManager
 from .argo_query import ArgoQueryEngine
 from .ocean_3d_query import Ocean3DQueryEngine
 from .ocean_slice import OceanSliceEngine
+
+from .navigation_models import (
+    NavigationRequest,
+    NavigationResult,
+)
+from .navigation_astar import (
+    NavigationRouteEngine,
+)
+
 from .schemas import (
     ArgoProfileDiscoveryResponse,
     ArgoProfileSeries,
@@ -39,6 +49,7 @@ from .schemas import (
 #   /api/v1/ocean/slice
 #   /api/v1/argo/profiles
 #   /api/v1/argo/profile
+#   /api/v1/navigation/route
 #
 # Scientific rules:
 #
@@ -46,6 +57,11 @@ from .schemas import (
 #   interpolation  = false
 #   Argo PRES      = dbar
 #   Argo PRES is never silently converted to depth.
+#
+# Navigation:
+#
+#   Navigation uses the verified OceanSight 4D A* engine.
+#   HYCOM environmental timestamps come from real INCOIS source TIME values.
 # =============================================================================
 
 
@@ -54,7 +70,8 @@ app = FastAPI(
     version="1.0.0",
     description=(
         "Scientific ocean data API backed by "
-        "INCOIS HYCOM, INCOIS Argo, and GEBCO 2026. "
+        "INCOIS HYCOM, INCOIS Argo, GEBCO 2026, "
+        "and the OceanSight-V 4D navigation engine. "
         "Real source observations can be acquired live "
         "when they are not already available locally."
     ),
@@ -72,6 +89,42 @@ slice_engine = OceanSliceEngine()
 argo_engine = ArgoQueryEngine()
 
 argo_live_manager = ArgoLiveManager()
+
+
+# =============================================================================
+# NAVIGATION ENGINE
+# =============================================================================
+#
+# IMPORTANT:
+#
+# NavigationRouteEngine performs live HYCOM time discovery when it is
+# initialized.
+#
+# Therefore it is intentionally created lazily on the first navigation
+# request rather than at FastAPI import time.
+# =============================================================================
+
+_navigation_engine: NavigationRouteEngine | None = None
+
+
+def get_navigation_engine() -> NavigationRouteEngine:
+    """
+    Lazily create the verified 4D navigation engine.
+
+    Existing scientific API startup behavior remains unchanged because
+    INCOIS navigation discovery is not performed merely by importing
+    app.api.
+    """
+
+    global _navigation_engine
+
+    if _navigation_engine is None:
+
+        _navigation_engine = (
+            NavigationRouteEngine()
+        )
+
+    return _navigation_engine
 
 
 # =============================================================================
@@ -276,6 +329,10 @@ def health() -> dict[str, Any]:
             ),
 
             "live_gebco_acquisition": (
+                "enabled"
+            ),
+
+            "navigation_4d_astar": (
                 "enabled"
             ),
         },
@@ -528,6 +585,81 @@ def hycom_times(
 
 
 # =============================================================================
+# NAVIGATION ROUTE
+# =============================================================================
+
+@app.post(
+    "/api/v1/navigation/route",
+    response_model=NavigationResult,
+)
+def navigation_route(
+    request: NavigationRequest,
+) -> NavigationResult:
+    """
+    Calculate a real-data 4D navigation route.
+
+    Navigation is common to all OceanSight-V operational modes:
+
+        disaster
+        logistics
+        fisheries
+        naval
+
+    The supplied NavigationRequest selects the operating mode.
+
+    Temporal integrity:
+
+        request.departure_time_utc
+            = physical vessel departure time
+
+        HYCOM model time
+            = exact real INCOIS HYCOM source TIME
+
+    The navigation engine performs no synthetic-data fallback
+    and no interpolation.
+    """
+
+    try:
+
+        navigation_engine = (
+            get_navigation_engine()
+        )
+
+        result = navigation_engine.route(
+            request
+        )
+
+        return result
+
+    except ValueError as exc:
+
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    except RuntimeError as exc:
+
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Navigation scientific engine unavailable: "
+                f"{exc}"
+            ),
+        ) from exc
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Navigation route calculation failed: "
+                f"{exc}"
+            ),
+        ) from exc
+
+
+# =============================================================================
 # ARGO LOCAL PROFILE DISCOVERY HELPER
 # =============================================================================
 
@@ -689,9 +821,6 @@ def argo_profiles(
 
         # ---------------------------------------------------------------------
         # SECOND: if local store has no profiles, use the live INCOIS source.
-        #
-        # This is deliberately a fallback rather than downloading complete
-        # profiles for every map marker.
         # ---------------------------------------------------------------------
 
         acquisition = None
@@ -1051,9 +1180,6 @@ def argo_profile(
 
         # ---------------------------------------------------------------------
         # Refresh from SQLite after live acquisition.
-        #
-        # The live manager has already validated, normalized and ingested the
-        # exact real profile.
         # ---------------------------------------------------------------------
 
         refreshed_profile = (
@@ -1455,3 +1581,4 @@ if __name__ == "__main__":
         port=8001,
         reload=False,
     )
+
