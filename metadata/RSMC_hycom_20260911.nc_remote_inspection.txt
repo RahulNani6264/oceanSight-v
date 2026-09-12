@@ -1,0 +1,18 @@
+OCEANSIGHT-V REMOTE INCOIS HYCOM INSPECTION
+File: RSMC_hycom_20260911.nc
+OPeNDAP: https://incois.gov.in/thredds/dodsC/osf/currents2/RSMC_hycom_20260911.nc
+
+IMPORTANT:
+No full NetCDF file was downloaded.
+Only DDS and DAS metadata were requested.
+
+SCIENTIFIC DISCOVERY:
+temperature: TEMP, TEMP_CT
+salinity: SALN, SALNA
+u_current: UVEL
+v_current: UVEL, VVEL
+ssh: SSH
+mld: MLD
+tchp: TCHP
+vertical: DEPTH, DEPTH_bnds
+bathymetry: no obvious match

@@ -1,0 +1,19 @@
+{
+  "count": 1,
+  "plans": [
+    {
+      "time_index": 0,
+      "depth_start": 0,
+      "depth_count": 6,
+      "lat_start": 807,
+      "lat_count": 9,
+      "lon_start": 1083,
+      "lon_count": 8,
+      "requested_time_utc": "2026-09-10T06:00:00Z",
+      "lat_min": -1.979606032371521,
+      "lat_max": -1.4998286962509155,
+      "lon_min": 84.97999572753906,
+      "lon_max": 85.39999389648438
+    }
+  ]
+}

@@ -1,0 +1,87 @@
+[
+  {
+    "dataset_id": "allDatasets",
+    "title": "* The List of All Active Datasets in this ERDDAP *",
+    "accessible": "public"
+  },
+  {
+    "dataset_id": "AMSRE_MONTHLY_GLOBAL",
+    "title": "AMSRE Monthly Global Data",
+    "accessible": "public"
+  },
+  {
+    "dataset_id": "ascat_daily_datasets",
+    "title": "Daily ASCAT global wind field",
+    "accessible": "public"
+  },
+  {
+    "dataset_id": "NOAA_AVHRR_AMSR_datasets",
+    "title": "Daily-OI-V2, final, Data (Ship, Buoy, AMSR-E, AVHRR, GSFC-ice)",
+    "accessible": "public"
+  },
+  {
+    "dataset_id": "incois_argo_10day_McCreary",
+    "title": "INCOIS ARGO 10 Day data Kessler-McCreary Methodology",
+    "accessible": "public"
+  },
+  {
+    "dataset_id": "incois_argo_10d_VAM",
+    "title": "INCOIS ARGO 10 day data Variational Analysis Methodology",
+    "accessible": "public"
+  },
+  {
+    "dataset_id": "incois_argo_mnt_McCreary",
+    "title": "INCOIS ARGO Monthly data Kessler-McCreary Methodology",
+    "accessible": "public"
+  },
+  {
+    "dataset_id": "incois_argo_mnt_VAM",
+    "title": "INCOIS ARGO Monthly data Variational Analysis Methodology",
+    "accessible": "public"
+  },
+  {
+    "dataset_id": "incois_argo_sst_weekly",
+    "title": "INCOIS argo SST data Weekly",
+    "accessible": "public"
+  },
+  {
+    "dataset_id": "incois_oceansat2_datasets",
+    "title": "INCOIS Oceansat 2 OCM Data",
+    "accessible": "public"
+  },
+  {
+    "dataset_id": "incois_quickscat_daily_datasets",
+    "title": "INCOIS Quickscat Daily Data",
+    "accessible": "public"
+  },
+  {
+    "dataset_id": "incois_quickscat_mnt_datasets",
+    "title": "INCOIS Quickscat Monthly Data",
+    "accessible": "public"
+  },
+  {
+    "dataset_id": "incois_tmi_3day_datasets",
+    "title": "INCOIS TMI 3Day Data",
+    "accessible": "public"
+  },
+  {
+    "dataset_id": "incois_valueadded_products_datasets",
+    "title": "INCOIS Value Added Products",
+    "accessible": "public"
+  },
+  {
+    "dataset_id": "Indian_ARGO_Floats",
+    "title": "INDIAN ARGO Floats Data",
+    "accessible": "public"
+  },
+  {
+    "dataset_id": "IRS_chlorophyll_datasets",
+    "title": "IRS P4 OCM-Chlorophyll",
+    "accessible": "public"
+  },
+  {
+    "dataset_id": "ascat_mnt_datasets",
+    "title": "Monthly ASCAT global wind field",
+    "accessible": "public"
+  }
+]

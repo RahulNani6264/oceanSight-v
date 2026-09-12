@@ -1,0 +1,86 @@
+Dataset {
+    Float32 LON[LON = 1665];
+    Float32 LAT[LAT = 1384];
+    Float32 LAT_bnds[LAT = 1384][bnds = 2];
+    Float64 TIME[TIME = 28];
+    Grid {
+     ARRAY:
+        Float32 SSH[TIME = 28][LAT = 1384][LON = 1665];
+     MAPS:
+        Float64 TIME[TIME = 28];
+        Float32 LAT[LAT = 1384];
+        Float32 LON[LON = 1665];
+    } SSH;
+    Float32 DEPTH[DEPTH = 6];
+    Float32 DEPTH_bnds[DEPTH = 6][bnds = 2];
+    Grid {
+     ARRAY:
+        Float32 TEMP[TIME = 28][DEPTH = 6][LAT = 1384][LON = 1665];
+     MAPS:
+        Float64 TIME[TIME = 28];
+        Float32 DEPTH[DEPTH = 6];
+        Float32 LAT[LAT = 1384];
+        Float32 LON[LON = 1665];
+    } TEMP;
+    Grid {
+     ARRAY:
+        Float32 SALN[TIME = 28][DEPTH = 6][LAT = 1384][LON = 1665];
+     MAPS:
+        Float64 TIME[TIME = 28];
+        Float32 DEPTH[DEPTH = 6];
+        Float32 LAT[LAT = 1384];
+        Float32 LON[LON = 1665];
+    } SALN;
+    Grid {
+     ARRAY:
+        Float32 UVEL[TIME = 28][DEPTH = 6][LAT = 1384][LON = 1665];
+     MAPS:
+        Float64 TIME[TIME = 28];
+        Float32 DEPTH[DEPTH = 6];
+        Float32 LAT[LAT = 1384];
+        Float32 LON[LON = 1665];
+    } UVEL;
+    Grid {
+     ARRAY:
+        Float32 VVEL[TIME = 28][DEPTH = 6][LAT = 1384][LON = 1665];
+     MAPS:
+        Float64 TIME[TIME = 28];
+        Float32 DEPTH[DEPTH = 6];
+        Float32 LAT[LAT = 1384];
+        Float32 LON[LON = 1665];
+    } VVEL;
+    Grid {
+     ARRAY:
+        Float64 TCHP[TIME = 28][LAT = 1384][LON = 1665];
+     MAPS:
+        Float64 TIME[TIME = 28];
+        Float32 LAT[LAT = 1384];
+        Float32 LON[LON = 1665];
+    } TCHP;
+    Grid {
+     ARRAY:
+        Float64 MLD[TIME = 28][LAT = 1384][LON = 1665];
+     MAPS:
+        Float64 TIME[TIME = 28];
+        Float32 LAT[LAT = 1384];
+        Float32 LON[LON = 1665];
+    } MLD;
+    Grid {
+     ARRAY:
+        Float32 SALNA[TIME = 28][DEPTH = 6][LAT = 1384][LON = 1665];
+     MAPS:
+        Float64 TIME[TIME = 28];
+        Float32 DEPTH[DEPTH = 6];
+        Float32 LAT[LAT = 1384];
+        Float32 LON[LON = 1665];
+    } SALNA;
+    Grid {
+     ARRAY:
+        Float32 TEMP_CT[TIME = 28][DEPTH = 6][LAT = 1384][LON = 1665];
+     MAPS:
+        Float64 TIME[TIME = 28];
+        Float32 DEPTH[DEPTH = 6];
+        Float32 LAT[LAT = 1384];
+        Float32 LON[LON = 1665];
+    } TEMP_CT;
+} osf/currents2/RSMC_hycom_20260911.nc;

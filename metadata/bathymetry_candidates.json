@@ -1,0 +1,6 @@
+{
+  "source": "INCOIS ERDDAP allDatasets",
+  "catalog_url": "https://erddap.incois.gov.in/erddap/tabledap/allDatasets.csv?datasetID,accessible,institution,dataStructure,cdm_data_type,class,title,minLongitude,maxLongitude,longitudeSpacing,minLatitude,maxLatitude,latitudeSpacing,minAltitude,maxAltitude,minTime,maxTime,timeSpacing,griddap,tabledap,metadata,sourceUrl,infoUrl,testOutOfDate,outOfDate,summary",
+  "candidate_count": 0,
+  "candidates": []
+}

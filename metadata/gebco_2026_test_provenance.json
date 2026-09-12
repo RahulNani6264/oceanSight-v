@@ -1,0 +1,77 @@
+{
+  "source": "GEBCO",
+  "dataset": "GEBCO_2026",
+  "url": "https://dap.ceda.ac.uk/thredds/dodsC/bodc/gebco/global/gebco_2026/ice_surface_elevation/netcdf/GEBCO_2026.nc",
+  "variant": "ice_surface_elevation",
+  "opened_at_utc": "2026-09-11T16:59:02.661763+00:00",
+  "dimensions": {
+    "maxStrlen64": 64,
+    "lat": 43200,
+    "lon": 86400
+  },
+  "variables": {
+    "crs": {
+      "dimensions": [
+        "maxStrlen64"
+      ],
+      "dtype": "|S1"
+    },
+    "elevation": {
+      "dimensions": [
+        "lat",
+        "lon"
+      ],
+      "dtype": "int16"
+    },
+    "lon": {
+      "dimensions": [
+        "lon"
+      ],
+      "dtype": "float64"
+    },
+    "lat": {
+      "dimensions": [
+        "lat"
+      ],
+      "dtype": "float64"
+    }
+  },
+  "elevation_attributes": {
+    "standard_name": "height_above_mean_sea_level",
+    "long_name": "Elevation relative to sea level",
+    "units": "m",
+    "grid_mapping": "crs",
+    "sdn_parameter_urn": "SDN:P01::BATHHGHT",
+    "sdn_parameter_name": "Sea floor height (above mean sea level) {bathymetric height}",
+    "sdn_uom_urn": "SDN:P06::ULAA",
+    "sdn_uom_name": "Metres"
+  },
+  "test_region": {
+    "requested_latitude": [
+      8.0,
+      9.0
+    ],
+    "requested_longitude": [
+      80.0,
+      81.0
+    ],
+    "actual_latitude": [
+      8.002083333333331,
+      8.997916666666669
+    ],
+    "actual_longitude": [
+      80.0020833333333,
+      80.99791666666664
+    ],
+    "shape": [
+      240,
+      240
+    ],
+    "dtype": "int16",
+    "finite_count": 57600,
+    "total_count": 57600,
+    "valid_percent": 100.0,
+    "min_elevation": -20.0,
+    "max_elevation": 658.0
+  }
+}

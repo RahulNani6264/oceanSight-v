@@ -1,0 +1,93 @@
+Attributes {
+    LON {
+        String point_spacing "even";
+        String axis "X";
+        String standard_name "longitude";
+    }
+    LAT {
+        String point_spacing "uneven";
+        String axis "Y";
+        String standard_name "latitude";
+        String bounds "LAT_bnds";
+    }
+    LAT_bnds {
+    }
+    TIME {
+        String units "days since 1900-12-31";
+        String calendar "standard";
+        String axis "T";
+        String standard_name "time";
+    }
+    SSH {
+        Float32 missing_value 1.2676506E30;
+        Float32 _FillValue 1.2676506E30;
+        String long_name "ssh";
+        String units "m";
+        String history "From RSMC_hycom_20260911";
+    }
+    DEPTH {
+        String positive "down";
+        String point_spacing "uneven";
+        String axis "Z";
+        String standard_name "depth";
+        String bounds "DEPTH_bnds";
+    }
+    DEPTH_bnds {
+    }
+    TEMP {
+        Float32 _FillValue -1.0E34;
+        String long_name "TEMP";
+        String history "From RSMC_hycom_20260911";
+    }
+    SALN {
+        Float32 _FillValue -1.0E34;
+        String long_name "SALN";
+        String history "From RSMC_hycom_20260911";
+    }
+    UVEL {
+        Float32 missing_value 1.2676506E30;
+        Float32 _FillValue 1.2676506E30;
+        String long_name "eastward current";
+        String units "m/s";
+        String history "From RSMC_hycom_20260911";
+        String standard_name "eastward_current";
+    }
+    VVEL {
+        Float32 missing_value 1.2676506E30;
+        Float32 _FillValue 1.2676506E30;
+        String long_name "northward current";
+        String units "m/s";
+        String history "From RSMC_hycom_20260911";
+        String standard_name "northward_current";
+    }
+    TCHP {
+        Float64 missing_value -1.0E34;
+        Float64 _FillValue -1.0E34;
+        String long_name "'Tropical Cyclone Heat Potential'";
+        String units "'KJ/cm2'";
+        String history "From RSMC_hycom_merged";
+    }
+    MLD {
+        Float64 missing_value -1.0E34;
+        Float64 _FillValue -1.0E34;
+        String long_name "'Mixed Layer Depth (Density)(m)'";
+        String history "From RSMC_hycom_merged";
+    }
+    SALNA {
+        Float32 _FillValue -1.0E34;
+        String long_name "SALNA";
+        String history "From RSMC_hycom_20260911";
+    }
+    TEMP_CT {
+        Float32 _FillValue -1.0E34;
+        String long_name "TEMP_CT";
+        String history "From RSMC_hycom_20260911";
+    }
+    NC_GLOBAL {
+        String history "PyFerret V7.63 (optimized) 11-Sep-26";
+        String Conventions "CF-1.6";
+    }
+    DODS_EXTRA {
+        String Unlimited_Dimension "TIME";
+    }
+}
