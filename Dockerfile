@@ -26,14 +26,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY app/ ./app/
 COPY *.py ./
-COPY data/ ./data/
-COPY raw/ ./raw/
-COPY processed/ ./processed/
-COPY metadata/ ./metadata/
-COPY logs/ ./logs/
 
-# Create non-root user
-RUN groupadd -r oceansight && useradd -r -g oceansight oceansight && \
+# Create necessary directories and non-root user
+RUN mkdir -p data raw processed metadata logs && \
+    groupadd -r oceansight && useradd -r -g oceansight oceansight && \
     chown -R oceansight:oceansight /app
 
 USER oceansight
@@ -46,4 +42,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-of-period=60s --retries=3 \
     CMD curl -f http://localhost:8001/health || exit 1
 
 # Run the application
-CMD ["uvicorn", "app.api:app", "--host", "0.0.0.0", "--port", "8001", "--workers", "4"]
+CMD ["uvicorn", "app.api:app", "--host", "0.0.0.0", "--port", "8001"]
