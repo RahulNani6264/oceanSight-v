@@ -35,4 +35,16 @@ Thumbs.db
 
 # Large binary files and archives
 *.bin
-*.zip 
+*.zip
+*.json
+!package.json
+!package-lock.json
+!render.yaml
+!openapi.json
+!argo_location_hycom_plan.json
+!wind-response.json
+!temperature.json
+!current_u_cropped.json
+!current_v_cropped.json
+!current_u.json
+!current_v.json 
