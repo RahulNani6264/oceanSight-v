@@ -4,6 +4,11 @@ import asyncio
 from pathlib import Path
 from urllib.parse import quote
 
+
+# This module is a manual live-data diagnostic script.
+# Prevent pytest from collecting its helper function as a test.
+__test__ = False
+
 import httpx
 import truststore
 

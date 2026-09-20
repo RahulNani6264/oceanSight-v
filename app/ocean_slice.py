@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,8 +13,15 @@ from .hycom_chunk_index import (
     HycomChunkIndex,
     HycomChunkRecord,
 )
+from .hycom_live_manager import HycomLiveManager
+from .hycom_thredds_discovery import find_dataset_for_time
 
-
+from .ocean_variables import (
+    get_variable_definition,
+    normalize_variable_name,
+    source_fields_for,
+    variable_is_surface_only,
+)
 # =============================================================================
 # OCEANSIGHT-V
 # HYCOM SCIENTIFIC DEPTH-SLICE ENGINE
@@ -84,48 +92,74 @@ class VariableDefinition:
     units: str
     dimensions: str
     depth_dependent: bool
+    source_fields: tuple[str, ...]
+    derived_kind: str | None = None
 
 
 VARIABLES: dict[str, VariableDefinition] = {
-
-    "TEMP": VariableDefinition(
-        name="TEMP",
+    "temperature": VariableDefinition(
+        name="temperature",
         output_name="temperature_c",
         units="degree_Celsius",
         dimensions="[time, depth, lat, lon]",
         depth_dependent=True,
+        source_fields=("TEMP",),
     ),
 
-    "SALN": VariableDefinition(
-        name="SALN",
+    "salinity": VariableDefinition(
+        name="salinity",
         output_name="salinity_psu",
         units="PSU",
         dimensions="[time, depth, lat, lon]",
         depth_dependent=True,
+        source_fields=("SALN",),
     ),
 
-    "UVEL": VariableDefinition(
-        name="UVEL",
+    "current_u": VariableDefinition(
+        name="current_u",
         output_name="u_current_m_s",
         units="m s-1",
         dimensions="[time, depth, lat, lon]",
         depth_dependent=True,
+        source_fields=("UVEL",),
     ),
 
-    "VVEL": VariableDefinition(
-        name="VVEL",
+    "current_v": VariableDefinition(
+        name="current_v",
         output_name="v_current_m_s",
         units="m s-1",
         dimensions="[time, depth, lat, lon]",
         depth_dependent=True,
+        source_fields=("VVEL",),
     ),
 
-    "SSH": VariableDefinition(
-        name="SSH",
+    "current_speed": VariableDefinition(
+        name="current_speed",
+        output_name="current_speed_m_s",
+        units="m s-1",
+        dimensions="[time, depth, lat, lon]",
+        depth_dependent=True,
+        source_fields=("UVEL", "VVEL"),
+        derived_kind="speed",
+    ),
+
+    "current_direction": VariableDefinition(
+        name="current_direction",
+        output_name="current_direction_degrees",
+        units="degree",
+        dimensions="[time, depth, lat, lon]",
+        depth_dependent=True,
+        source_fields=("UVEL", "VVEL"),
+        derived_kind="direction",
+    ),
+
+    "sea_surface_height": VariableDefinition(
+        name="sea_surface_height",
         output_name="ssh_m",
         units="m",
         dimensions="[time, lat, lon]",
         depth_dependent=False,
+        source_fields=("SSH",),
     ),
 }
 
@@ -192,12 +226,19 @@ class OceanSliceEngine:
     def __init__(
         self,
         chunk_index: HycomChunkIndex | None = None,
+        live_manager: HycomLiveManager | None = None,
     ) -> None:
 
         self.index = (
             chunk_index
             if chunk_index is not None
             else HycomChunkIndex()
+        )
+
+        self.live_manager = (
+            live_manager
+            if live_manager is not None
+            else HycomLiveManager()
         )
 
     # =========================================================================
@@ -299,28 +340,73 @@ class OceanSliceEngine:
         variable: str,
     ) -> VariableDefinition:
 
-        normalized = (
-            str(variable)
-            .strip()
-            .upper()
+        raw = str(variable).strip()
+
+        aliases: dict[str, str] = {
+            # Canonical names
+            "temperature": "temperature",
+            "salinity": "salinity",
+            "current_u": "current_u",
+            "current_v": "current_v",
+            "current_speed": "current_speed",
+            "current_direction": "current_direction",
+            "sea_surface_height": "sea_surface_height",
+
+            # HYCOM/source names
+            "temp": "temperature",
+            "sst": "temperature",
+            "saln": "salinity",
+            "uvel": "current_u",
+            "vvel": "current_v",
+            "ssh": "sea_surface_height",
+
+            # Short derived names
+            "speed": "current_speed",
+            "direction": "current_direction",
+        }
+
+        lookup_key = (
+            raw.lower()
+            .replace("-", "_")
+            .replace(" ", "_")
         )
 
-        if normalized not in VARIABLES:
+        if lookup_key in aliases:
+            normalized = aliases[lookup_key]
 
+        else:
+            try:
+                catalog_name = normalize_variable_name(raw)
+
+            except Exception as exc:
+                raise ValueError(
+                    f"Unsupported ocean variable '{variable}'."
+                ) from exc
+
+            source_aliases: dict[str, str] = {
+                "TEMP": "temperature",
+                "SALN": "salinity",
+                "UVEL": "current_u",
+                "VVEL": "current_v",
+                "SSH": "sea_surface_height",
+            }
+
+            normalized = source_aliases.get(
+                str(catalog_name).upper(),
+                str(catalog_name).lower(),
+            )
+
+        if normalized not in VARIABLES:
             supported = ", ".join(
-                sorted(
-                    VARIABLES.keys()
-                )
+                sorted(VARIABLES.keys())
             )
 
             raise ValueError(
-                f"Unsupported HYCOM variable '{variable}'. "
+                f"Unsupported ocean variable '{variable}'. "
                 f"Supported variables: {supported}"
             )
 
-        return VARIABLES[
-            normalized
-        ]
+        return VARIABLES[normalized]
 
     # =========================================================================
     # TIME
@@ -450,7 +536,6 @@ class OceanSliceEngine:
     # =========================================================================
     # FIND REGION CANDIDATES
     # =========================================================================
-
     def _find_region_candidates(
         self,
         latitude_min: float,
@@ -459,6 +544,7 @@ class OceanSliceEngine:
         longitude_max: float,
         time_utc: str,
         depth_m: float,
+        variable: str,
     ) -> list[HycomChunkRecord]:
 
         canonical_time = (
@@ -490,12 +576,16 @@ class OceanSliceEngine:
             # Requested depth must be within chunk depth range.
             # -----------------------------------------------------------------
 
-            if not (
-                chunk.depth_min_m
-                <= depth_m
-                <= chunk.depth_max_m
+            # Surface-only variables such as SSH do not require a depth match.
+            if not variable_is_surface_only(
+                normalize_variable_name(variable)
             ):
-                continue
+                if not (
+                    chunk.depth_min_m
+                    <= depth_m
+                    <= chunk.depth_max_m
+                ):
+                    continue
 
             # -----------------------------------------------------------------
             # Geographic overlap.
@@ -805,6 +895,133 @@ class OceanSliceEngine:
             ] = False
 
     # =========================================================================
+    # LIVE SOURCE-TIME VALIDATION
+    # =========================================================================
+
+    @classmethod
+    def _require_exact_live_source_time(
+        cls,
+        time_utc: str,
+    ) -> None:
+        """
+        Verify that a missing local slice may only be acquired when the
+        requested time exactly exists in the real INCOIS HYCOM TIME vector.
+
+        This guard is essential because HycomChunkPlanner.plan_point() uses
+        nearest-index selection. We must never allow a non-source vessel/UI
+        time such as 07:00Z to become a 06:00Z or 12:00Z HYCOM record.
+        """
+
+        canonical_time = cls._canonical_time(
+            time_utc
+        )
+
+        discovery = find_dataset_for_time(
+            requested_time_utc=canonical_time,
+        )
+
+        if not discovery.get(
+            "available",
+            False,
+        ):
+            raise LookupError(
+                "No INCOIS RSMC HYCOM dataset covers the requested UTC time."
+            )
+
+        selected = discovery.get(
+            "selected"
+        )
+
+        if not isinstance(
+            selected,
+            dict,
+        ):
+            raise LookupError(
+                "INCOIS HYCOM dataset discovery returned no selected dataset."
+            )
+
+        source_times = selected.get(
+            "time_iso",
+            [],
+        )
+
+        exact_match = any(
+            cls._canonical_time(str(value)) == canonical_time
+            for value in source_times
+            if value is not None
+        )
+
+        if not exact_match:
+            raise LookupError(
+                "The requested timestamp does not exactly match an INCOIS HYCOM source TIME value; "
+                "live acquisition was not performed."
+            )
+
+    # =========================================================================
+    # LIVE ACQUISITION FOR A SLICE
+    # =========================================================================
+
+    def _acquire_slice_coverage(
+        self,
+        latitude_min: float,
+        latitude_max: float,
+        longitude_min: float,
+        longitude_max: float,
+        time_utc: str,
+    ) -> dict[str, Any]:
+        """
+        Acquire real INCOIS HYCOM chunks covering the requested slice.
+
+        The existing live manager is point/radius based, so the center of the
+        requested bounding box is used with a radius large enough to cover the
+        complete requested latitude/longitude span. No scientific values are
+        invented and no time interpolation is permitted.
+        """
+
+        self._require_exact_live_source_time(
+            time_utc
+        )
+
+        center_latitude = (
+            float(latitude_min)
+            + float(latitude_max)
+        ) / 2.0
+
+        center_longitude = (
+            float(longitude_min)
+            + float(longitude_max)
+        ) / 2.0
+
+        radius_degrees = max(
+            (float(latitude_max) - float(latitude_min)) / 2.0,
+            (float(longitude_max) - float(longitude_min)) / 2.0,
+            0.01,
+        )
+
+        acquisition = self.live_manager.ensure_hycom_chunk(
+            latitude=center_latitude,
+            longitude=center_longitude,
+            time_utc=self._canonical_time(time_utc),
+            radius_degrees=radius_degrees,
+        )
+
+        if not acquisition.get(
+            "available",
+            False,
+        ):
+            reason = acquisition.get(
+                "reason",
+                "Live INCOIS HYCOM acquisition was unavailable.",
+            )
+            raise LookupError(
+                str(reason)
+            )
+
+        self.index = HycomChunkIndex()
+
+        return acquisition
+
+    # =========================================================================
     # QUERY
     # =========================================================================
 
@@ -847,11 +1064,7 @@ class OceanSliceEngine:
             )
         )
 
-        variable_definition = (
-            self._variable_definition(
-                variable
-            )
-        )
+        variable_definition = self._variable_definition(variable)
 
         # ---------------------------------------------------------------------
         # Find existing real chunks.
@@ -864,16 +1077,46 @@ class OceanSliceEngine:
                 longitude_min=longitude_min,
                 longitude_max=longitude_max,
                 time_utc=canonical_time,
+                variable=variable_definition.name,
                 depth_m=depth_m,
             )
         )
 
         if not records:
 
-            raise LookupError(
-                "No locally stored HYCOM chunks cover "
-                "the requested slice at the exact source time."
+            # -----------------------------------------------------------------
+            # Live acquisition fallback.
+            #
+            # The local index may not contain a newly requested geographic
+            # slice. Acquire only the required real INCOIS chunks, rebuild the
+            # index, and retry the exact same scientific request.
+            # -----------------------------------------------------------------
+
+            self._acquire_slice_coverage(
+                latitude_min=latitude_min,
+                latitude_max=latitude_max,
+                longitude_min=longitude_min,
+                longitude_max=longitude_max,
+                time_utc=canonical_time,
             )
+
+            records = (
+                self._find_region_candidates(
+                    latitude_min=latitude_min,
+                    latitude_max=latitude_max,
+                    longitude_min=longitude_min,
+                    longitude_max=longitude_max,
+                    time_utc=canonical_time,
+                    variable=variable_definition.name,
+                    depth_m=depth_m,
+                )
+            )
+
+            if not records:
+                raise LookupError(
+                    "Live INCOIS HYCOM acquisition completed, but no indexed chunks cover "
+                    "the requested slice at the exact source time."
+                )
 
         # ---------------------------------------------------------------------
         # Select actual source depth for depth-dependent fields.
@@ -1121,20 +1364,25 @@ class OceanSliceEngine:
             # Verify requested variable exists.
             # -----------------------------------------------------------------
 
-            variable_name = (
-                variable_definition.name
-            )
+            source_fields = variable_definition.source_fields
 
-            if variable_name not in arrays:
+            missing_source_fields = [
+                field_name
+                for field_name in source_fields
+                if field_name not in arrays
+            ]
 
+            if missing_source_fields:
                 raise RuntimeError(
                     f"Chunk {record.chunk_file} does not contain "
-                    f"HYCOM variable {variable_name}."
+                    "required HYCOM variable fields: "
+                    + ", ".join(missing_source_fields)
                 )
 
-            field = arrays[
-                variable_name
-            ]
+            source_arrays = {
+                field_name: arrays[field_name]
+                for field_name in source_fields
+            }
 
             # -----------------------------------------------------------------
             # Select depth level.
@@ -1212,22 +1460,68 @@ class OceanSliceEngine:
                     if variable_definition.depth_dependent:
 
                         if depth_index is None:
-
                             raise RuntimeError(
                                 "Depth index was not selected for "
                                 "a depth-dependent variable."
                             )
 
-                        value = field[
-                            0,
-                            depth_index,
-                            source_lat_index,
-                            source_lon_index,
-                        ]
+                        u_value = None
+                        v_value = None
+
+                        if "UVEL" in source_arrays:
+                            u_value = source_arrays["UVEL"][
+                                0,
+                                depth_index,
+                                source_lat_index,
+                                source_lon_index,
+                            ]
+
+                        if "VVEL" in source_arrays:
+                            v_value = source_arrays["VVEL"][
+                                0,
+                                depth_index,
+                                source_lat_index,
+                                source_lon_index,
+                            ]
+
+                        if variable_definition.derived_kind == "speed":
+                            if (
+                                not self._is_valid_source_value(u_value)
+                                or not self._is_valid_source_value(v_value)
+                            ):
+                                value = np.nan
+                            else:
+                                value = float(
+                                    np.hypot(float(u_value), float(v_value))
+                                )
+
+                        elif variable_definition.derived_kind == "direction":
+                            if (
+                                not self._is_valid_source_value(u_value)
+                                or not self._is_valid_source_value(v_value)
+                            ):
+                                value = np.nan
+                            else:
+                                value = float(
+                                    np.degrees(
+                                        np.arctan2(
+                                            float(v_value), float(u_value)
+                                        )
+                                    )
+                                )
+
+                        else:
+                            source_field = source_fields[0]
+                            value = source_arrays[source_field][
+                                0,
+                                depth_index,
+                                source_lat_index,
+                                source_lon_index,
+                            ]
 
                     else:
-
-                        value = field[
+                        source_field = source_fields[0]
+                        value = source_arrays[source_field][
                             0,
                             source_lat_index,
                             source_lon_index,
@@ -1398,6 +1692,7 @@ class OceanSliceEngine:
             longitude_min=longitude_min,
             longitude_max=longitude_max,
             depth_m=depth_m,
+            
             time_utc=time_utc,
             variable=variable,
         )
@@ -1493,16 +1788,16 @@ class OceanSliceEngine:
 
             "variable": {
                 "name": (
-                    result.variable
+                    str(variable)
                 ),
                 "units": (
                     result.units
                 ),
                 "dimensions": (
-                    VARIABLES[
-                        result.variable
-                    ].dimensions
-                ),
+    VARIABLES[
+        normalize_variable_name(result.variable)
+    ].dimensions
+),
             },
 
             "grid": {

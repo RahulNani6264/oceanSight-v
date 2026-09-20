@@ -1,0 +1,689 @@
+import {
+  OrbitControls,
+  useTexture,
+} from "@react-three/drei";
+
+import {
+  useFrame,
+  useThree,
+} from "@react-three/fiber";
+
+import {
+  useEffect,
+  useMemo,
+  useRef,
+} from "react";
+
+import * as THREE from "three";
+
+
+export const EARTH_RADIUS = 2.35;
+
+const EARTH_SEGMENTS = 64;
+const CLOUD_SEGMENTS = 48;
+const ATMOSPHERE_SEGMENTS = 48;
+
+// ============================================================================
+// COORDINATE HELPERS
+// ============================================================================
+
+export function latLonToVector3(
+  latitude,
+  longitude,
+  radius = EARTH_RADIUS,
+) {
+  const lat = THREE.MathUtils.degToRad(latitude);
+  const lon = THREE.MathUtils.degToRad(longitude);
+
+  const cosLat = Math.cos(lat);
+
+  return new THREE.Vector3(
+    radius * cosLat * Math.cos(lon),
+    radius * Math.sin(lat),
+    radius * cosLat * Math.sin(lon),
+  );
+}
+
+export function vector3ToLatLon(vector) {
+  const normalized = vector.clone().normalize();
+
+  return {
+    lat: THREE.MathUtils.radToDeg(
+      Math.asin(
+        THREE.MathUtils.clamp(
+          normalized.y,
+          -1,
+          1,
+        ),
+      ),
+    ),
+    lon: THREE.MathUtils.radToDeg(
+      Math.atan2(
+        normalized.z,
+        normalized.x,
+      ),
+    ),
+  };
+}
+
+// ============================================================================
+// SMOOTH CAMERA FLY-TO
+// ============================================================================
+
+function CameraFlyToCoordinate({
+  flyToCoordinate,
+}) {
+  const { camera } = useThree();
+
+  const targetDirection = useRef(
+    new THREE.Vector3(),
+  );
+
+  const desiredPosition = useRef(
+    new THREE.Vector3(),
+  );
+
+  const currentDirection = useRef(
+    new THREE.Vector3(),
+  );
+
+  const animationActive = useRef(false);
+
+  useEffect(() => {
+    if (!flyToCoordinate) {
+      return;
+    }
+
+    const latitude = Number(flyToCoordinate.lat);
+    const longitude = Number(flyToCoordinate.lon);
+
+    if (
+      !Number.isFinite(latitude) ||
+      !Number.isFinite(longitude)
+    ) {
+      return;
+    }
+
+    const target = latLonToVector3(
+      latitude,
+      longitude,
+      EARTH_RADIUS,
+    );
+
+    targetDirection.current
+      .copy(target)
+      .normalize();
+
+    animationActive.current = true;
+  }, [flyToCoordinate]);
+
+  useFrame((_, delta) => {
+    if (!animationActive.current) {
+      return;
+    }
+
+    const safeDistance = Math.max(
+      camera.position.length(),
+      5.3,
+    );
+
+    currentDirection.current
+      .copy(camera.position)
+      .normalize();
+
+    currentDirection.current.lerp(
+      targetDirection.current,
+      1 - Math.exp(-6 * delta),
+    );
+
+    currentDirection.current.normalize();
+
+    desiredPosition.current
+      .copy(currentDirection.current)
+      .multiplyScalar(safeDistance);
+
+    camera.position.lerp(
+      desiredPosition.current,
+      1 - Math.exp(-6 * delta),
+    );
+
+    camera.lookAt(0, 0, 0);
+
+    const alignment =
+      currentDirection.current.dot(
+        targetDirection.current,
+      );
+
+    if (alignment > 0.99995) {
+      camera.position
+        .copy(targetDirection.current)
+        .multiplyScalar(safeDistance);
+
+      camera.lookAt(0, 0, 0);
+      animationActive.current = false;
+    }
+  });
+
+  return null;
+}
+
+// ============================================================================
+// EARTH TRANSITION
+// ============================================================================
+
+function EarthTransition({
+  transitionState = "idle",
+}) {
+  const materialRef = useRef(null);
+
+  const targetOpacity = useMemo(() => {
+    if (
+      transitionState === "loading" ||
+      transitionState === "transitioning"
+    ) {
+      return 0.72;
+    }
+
+    if (transitionState === "error") {
+      return 0.9;
+    }
+
+    return 1;
+  }, [transitionState]);
+
+  useFrame((_, delta) => {
+    if (!materialRef.current) {
+      return;
+    }
+
+    materialRef.current.opacity = THREE.MathUtils.lerp(
+      materialRef.current.opacity,
+      targetOpacity,
+      1 - Math.exp(-5 * delta),
+    );
+  });
+
+  return (
+    <mesh renderOrder={20}>
+      <sphereGeometry
+        args={[
+          EARTH_RADIUS + 0.012,
+          ATMOSPHERE_SEGMENTS,
+          ATMOSPHERE_SEGMENTS,
+        ]}
+      />
+
+      <meshBasicMaterial
+        ref={materialRef}
+        color="#071522"
+        transparent
+        opacity={0}
+        depthWrite={false}
+        side={THREE.BackSide}
+      />
+    </mesh>
+  );
+}
+
+// ============================================================================
+// ATMOSPHERE
+// ============================================================================
+
+function Atmosphere() {
+  return (
+    <mesh scale={1.035}>
+      <sphereGeometry
+        args={[
+          EARTH_RADIUS,
+          ATMOSPHERE_SEGMENTS,
+          ATMOSPHERE_SEGMENTS,
+        ]}
+      />
+
+      <meshBasicMaterial
+        color="#4da6ff"
+        transparent
+        opacity={0.08}
+        side={THREE.BackSide}
+        depthWrite={false}
+      />
+    </mesh>
+  );
+}
+
+// ============================================================================
+// CLOUDS
+// ============================================================================
+
+function Clouds() {
+  const cloudTexture = useTexture(
+    "https://threejs.org/examples/textures/planets/earth_clouds_1024.png",
+  );
+
+  return (
+    <mesh scale={1.012}>
+      <sphereGeometry
+        args={[
+          EARTH_RADIUS,
+          CLOUD_SEGMENTS,
+          CLOUD_SEGMENTS,
+        ]}
+      />
+
+      <meshPhongMaterial
+        map={cloudTexture}
+        transparent
+        opacity={0.32}
+        depthWrite={false}
+        side={THREE.DoubleSide}
+      />
+    </mesh>
+  );
+}
+
+// ============================================================================
+// SELECTED COORDINATE MARKER
+// ============================================================================
+
+function LatitudeLongitudeMarker({
+  coordinate,
+}) {
+  const pulseRef = useRef(0);
+  const ringRef = useRef(null);
+  const pointRef = useRef(null);
+
+  const markerPosition = useMemo(() => {
+    if (!coordinate) {
+      return null;
+    }
+
+    const latitude = Number(coordinate.lat);
+    const longitude = Number(coordinate.lon);
+
+    if (
+      !Number.isFinite(latitude) ||
+      !Number.isFinite(longitude)
+    ) {
+      return null;
+    }
+
+    return latLonToVector3(
+      latitude,
+      longitude,
+      EARTH_RADIUS + 0.035,
+    );
+  }, [coordinate]);
+
+  const markerNormal = useMemo(() => {
+    return markerPosition
+      ? markerPosition.clone().normalize()
+      : null;
+  }, [markerPosition]);
+
+  const quaternion = useMemo(() => {
+    if (!markerNormal) {
+      return null;
+    }
+
+    const result = new THREE.Quaternion();
+
+    result.setFromUnitVectors(
+      new THREE.Vector3(0, 1, 0),
+      markerNormal,
+    );
+
+    return result;
+  }, [markerNormal]);
+
+  useFrame((_, delta) => {
+    if (!markerPosition) {
+      return;
+    }
+
+    pulseRef.current += delta * 4;
+
+    const pulse =
+      1 + Math.sin(pulseRef.current) * 0.18;
+
+    ringRef.current?.scale.set(
+      pulse,
+      pulse,
+      pulse,
+    );
+
+    const pointPulse =
+      1 + Math.sin(pulseRef.current) * 0.08;
+
+    pointRef.current?.scale.set(
+      pointPulse,
+      pointPulse,
+      pointPulse,
+    );
+  });
+
+  if (
+    !markerPosition ||
+    !markerNormal ||
+    !quaternion
+  ) {
+    return null;
+  }
+
+  return (
+    <group
+      position={markerPosition}
+      quaternion={quaternion}
+    >
+      <mesh ref={pointRef}>
+        <sphereGeometry args={[0.045, 12, 12]} />
+
+        <meshBasicMaterial
+          color="#ffffff"
+          toneMapped={false}
+        />
+      </mesh>
+
+      <mesh ref={ringRef}>
+        <ringGeometry args={[0.065, 0.085, 24]} />
+
+        <meshBasicMaterial
+          color="#ffffff"
+          transparent
+          opacity={0.9}
+          side={THREE.DoubleSide}
+          toneMapped={false}
+        />
+      </mesh>
+
+      <mesh position={[0, 0.04, 0]}>
+        <sphereGeometry args={[0.075, 12, 12]} />
+
+        <meshBasicMaterial
+          color="#ffffff"
+          transparent
+          opacity={0.12}
+          toneMapped={false}
+        />
+      </mesh>
+    </group>
+  );
+}
+
+// ============================================================================
+// EARTH SURFACE
+// ============================================================================
+
+function EarthSurface({
+  onHoverCoordinate,
+  onSelectCoordinate,
+}) {
+  const [
+    earthTexture,
+    normalTexture,
+    specularTexture,
+  ] = useTexture([
+    "https://threejs.org/examples/textures/planets/earth_atmos_2048.jpg",
+    "https://threejs.org/examples/textures/planets/earth_normal_2048.jpg",
+    "https://threejs.org/examples/textures/planets/earth_specular_2048.jpg",
+  ]);
+
+  const pointerDownRef = useRef(false);
+  const draggedRef = useRef(false);
+
+  const pointerStartRef = useRef({
+    x: 0,
+    y: 0,
+  });
+
+  const pendingSelectionTimerRef = useRef(null);
+
+  const DRAG_THRESHOLD_PX = 7;
+
+  useEffect(() => {
+    return () => {
+      if (pendingSelectionTimerRef.current) {
+        window.clearTimeout(
+          pendingSelectionTimerRef.current,
+        );
+
+        pendingSelectionTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  const handlePointerMove = (event) => {
+    if (!event.point) {
+      return;
+    }
+
+    onHoverCoordinate?.(
+      vector3ToLatLon(event.point),
+    );
+
+    if (
+      pointerDownRef.current &&
+      event.nativeEvent
+    ) {
+      const currentX =
+        event.nativeEvent.clientX;
+
+      const currentY =
+        event.nativeEvent.clientY;
+
+      const deltaX =
+        currentX - pointerStartRef.current.x;
+
+      const deltaY =
+        currentY - pointerStartRef.current.y;
+
+      const distance = Math.sqrt(
+        deltaX * deltaX +
+          deltaY * deltaY,
+      );
+
+      if (distance > DRAG_THRESHOLD_PX) {
+        draggedRef.current = true;
+
+        if (pendingSelectionTimerRef.current) {
+          window.clearTimeout(
+            pendingSelectionTimerRef.current,
+          );
+
+          pendingSelectionTimerRef.current = null;
+        }
+      }
+    }
+  };
+
+  const handlePointerDown = (event) => {
+    if (event.nativeEvent?.button !== 0) {
+      return;
+    }
+
+    pointerDownRef.current = true;
+    draggedRef.current = false;
+
+    pointerStartRef.current = {
+      x: event.nativeEvent?.clientX ?? 0,
+      y: event.nativeEvent?.clientY ?? 0,
+    };
+
+    if (pendingSelectionTimerRef.current) {
+      window.clearTimeout(
+        pendingSelectionTimerRef.current,
+      );
+
+      pendingSelectionTimerRef.current = null;
+    }
+  };
+
+  const handlePointerUp = (event) => {
+    if (event.nativeEvent?.button !== 0) {
+      return;
+    }
+
+    pointerDownRef.current = false;
+
+    if (draggedRef.current) {
+      draggedRef.current = false;
+      return;
+    }
+
+    const clickCount =
+      event.nativeEvent?.detail ?? 1;
+
+    if (clickCount > 1) {
+      if (pendingSelectionTimerRef.current) {
+        window.clearTimeout(
+          pendingSelectionTimerRef.current,
+        );
+
+        pendingSelectionTimerRef.current = null;
+      }
+
+      draggedRef.current = false;
+      return;
+    }
+
+    if (!event.point) {
+      return;
+    }
+
+    const selectedPoint = event.point.clone();
+
+    pendingSelectionTimerRef.current =
+      window.setTimeout(() => {
+        if (draggedRef.current) {
+          pendingSelectionTimerRef.current = null;
+          return;
+        }
+
+        onSelectCoordinate?.(
+          vector3ToLatLon(selectedPoint),
+        );
+
+        pendingSelectionTimerRef.current = null;
+      }, 300);
+  };
+
+  const handleDoubleClick = (event) => {
+    event.stopPropagation();
+
+    if (pendingSelectionTimerRef.current) {
+      window.clearTimeout(
+        pendingSelectionTimerRef.current,
+      );
+
+      pendingSelectionTimerRef.current = null;
+    }
+
+    draggedRef.current = false;
+  };
+
+  const handlePointerCancel = () => {
+    pointerDownRef.current = false;
+    draggedRef.current = false;
+
+    if (pendingSelectionTimerRef.current) {
+      window.clearTimeout(
+        pendingSelectionTimerRef.current,
+      );
+
+      pendingSelectionTimerRef.current = null;
+    }
+  };
+
+  return (
+    <mesh
+      onPointerMove={handlePointerMove}
+      onPointerDown={handlePointerDown}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerCancel}
+      onDoubleClick={handleDoubleClick}
+      receiveShadow={false}
+      castShadow={false}
+    >
+      <sphereGeometry
+        args={[
+          EARTH_RADIUS,
+          EARTH_SEGMENTS,
+          EARTH_SEGMENTS,
+        ]}
+      />
+
+      <meshPhongMaterial
+        map={earthTexture}
+        normalMap={normalTexture}
+        specularMap={specularTexture}
+        specular={new THREE.Color("#555555")}
+        shininess={8}
+      />
+    </mesh>
+  );
+}
+
+// ============================================================================
+// MAIN EARTH
+// ============================================================================
+
+function Earth({
+  onHoverCoordinate,
+  onSelectCoordinate,
+  selectedCoordinate,
+  flyToCoordinate,
+  transitionState = "idle",
+}) {
+  return (
+    <>
+      <ambientLight intensity={0.32} />
+
+      <directionalLight
+        position={[5, 3, 5]}
+        intensity={2.2}
+        castShadow={false}
+      />
+
+      <directionalLight
+        position={[-4, -2, -3]}
+        intensity={0.25}
+        castShadow={false}
+      />
+
+      <EarthSurface
+        onHoverCoordinate={onHoverCoordinate}
+        onSelectCoordinate={onSelectCoordinate}
+      />
+
+      <Clouds />
+
+      <Atmosphere />
+
+      <EarthTransition
+        transitionState={transitionState}
+      />
+
+      <LatitudeLongitudeMarker
+        coordinate={selectedCoordinate}
+      />
+
+      <CameraFlyToCoordinate
+        flyToCoordinate={flyToCoordinate}
+      />
+
+      <OrbitControls
+        enableDamping
+        dampingFactor={0.06}
+        enablePan
+        enableZoom
+        minDistance={4.2}
+        maxDistance={15}
+        rotateSpeed={0.55}
+        zoomSpeed={0.8}
+        panSpeed={0.5}
+        makeDefault
+      />
+    </>
+  );
+}
+
+export default Earth;

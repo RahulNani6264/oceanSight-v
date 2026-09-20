@@ -1,0 +1,11 @@
+HTTP/1.1 200 OK
+date: Tue, 15 Sep 2026 09:10:01 GMT
+server: uvicorn
+cache-control: public, max-age=300
+x-oceansight-tile-format: oceansight-f32-v1
+x-oceansight-tile-level: 2
+x-oceansight-tile-x: 2
+x-oceansight-tile-y: 0
+content-length: 387776
+content-type: application/octet-stream
+

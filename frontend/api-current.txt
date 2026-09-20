@@ -1,0 +1,273 @@
+﻿const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8001";
+
+/**
+ * Custom OceanSight API error.
+ */
+export class OceanSightApiError extends Error {
+  constructor(message, status = null, details = null) {
+    super(message);
+
+    this.name = "OceanSightApiError";
+    this.status = status;
+    this.details = details;
+  }
+}
+
+/**
+ * Convert camelCase names to snake_case.
+ *
+ * Example:
+ * latitudeMin -> latitude_min
+ * depthM      -> depth_m
+ * timeUtc     -> time_utc
+ */
+function toSnakeCase(value) {
+  return value.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
+}
+
+/**
+ * Convert query parameters into a URL query string.
+ */
+function buildQuery(params = {}) {
+  const query = new URLSearchParams();
+
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === "") {
+      return;
+    }
+
+    const backendKey = toSnakeCase(key);
+
+    if (Array.isArray(value)) {
+      value.forEach((item) => {
+        query.append(backendKey, String(item));
+      });
+    } else {
+      query.set(backendKey, String(value));
+    }
+  });
+
+  const queryString = query.toString();
+
+  return queryString ? `?${queryString}` : "";
+}
+
+/**
+ * Common API request handler.
+ */
+async function request(path, options = {}) {
+  let response;
+
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      ...options,
+      headers: {
+        Accept: "application/json",
+        ...(options.body
+          ? {
+              "Content-Type": "application/json",
+            }
+          : {}),
+        ...(options.headers || {}),
+      },
+    });
+  } catch (error) {
+    throw new OceanSightApiError(
+      `Unable to connect to OceanSight backend at ${API_BASE_URL}`,
+      null,
+      error
+    );
+  }
+
+  const responseText = await response.text();
+
+  let data = null;
+
+  if (responseText) {
+    try {
+      data = JSON.parse(responseText);
+    } catch {
+      data = responseText;
+    }
+  }
+
+  if (!response.ok) {
+    let message = `API request failed with status ${response.status}`;
+
+    if (typeof data === "object" && data !== null) {
+      if (typeof data.detail === "string") {
+        message = data.detail;
+      } else if (Array.isArray(data.detail)) {
+        message = data.detail
+          .map((item) => item.msg || JSON.stringify(item))
+          .join(", ");
+      } else if (data.message) {
+        message = data.message;
+      }
+    } else if (typeof data === "string" && data.trim()) {
+      message = data;
+    }
+
+    throw new OceanSightApiError(message, response.status, data);
+  }
+
+  return data;
+}
+
+/**
+ * GET /
+ */
+export async function getRoot() {
+  return request("/");
+}
+
+/**
+ * GET /api/v1/health
+ */
+export async function getHealth() {
+  return request("/api/v1/health");
+}
+
+/**
+ * GET /api/v1/hycom/times
+ */
+export async function getHycomTimes(params = {}) {
+  return request(`/api/v1/hycom/times${buildQuery(params)}`);
+}
+
+/**
+ * GET /api/v1/ocean/regions
+ */
+export async function getOceanRegions(params = {}) {
+  return request(`/api/v1/ocean/regions${buildQuery(params)}`);
+}
+
+/**
+ * GET /api/v1/ocean/identify
+ *
+ * Supports:
+ *
+ * identifyOcean(latitude, longitude)
+ *
+ * identifyOcean({
+ *   latitude,
+ *   longitude,
+ * })
+ *
+ * identifyOcean({
+ *   lat,
+ *   lon,
+ * })
+ */
+export async function identifyOcean(latitudeOrParams, longitude) {
+  let latitude = latitudeOrParams;
+  let resolvedLongitude = longitude;
+
+  if (
+    typeof latitudeOrParams === "object" &&
+    latitudeOrParams !== null
+  ) {
+    latitude =
+      latitudeOrParams.latitude ??
+      latitudeOrParams.lat;
+
+    resolvedLongitude =
+      latitudeOrParams.longitude ??
+      latitudeOrParams.lon ??
+      latitudeOrParams.lng;
+  }
+
+  latitude = Number(latitude);
+  resolvedLongitude = Number(resolvedLongitude);
+
+  if (
+    !Number.isFinite(latitude) ||
+    !Number.isFinite(resolvedLongitude)
+  ) {
+    throw new OceanSightApiError(
+      "identifyOcean requires numeric latitude and longitude",
+      400,
+      {
+        latitude,
+        longitude: resolvedLongitude,
+      }
+    );
+  }
+
+  return request(
+    `/api/v1/ocean/identify${buildQuery({
+      latitude,
+      longitude: resolvedLongitude,
+    })}`
+  );
+}
+
+/**
+ * GET /api/v1/ocean/point
+ */
+export async function getHycomPointValue(params = {}) {
+  return request(`/api/v1/ocean/point${buildQuery(params)}`);
+}
+
+/**
+ * GET /api/v1/ocean/slice
+ *
+ * Frontend camelCase parameters are converted automatically:
+ *
+ * latitudeMin -> latitude_min
+ * latitudeMax -> latitude_max
+ * longitudeMin -> longitude_min
+ * longitudeMax -> longitude_max
+ * depthM      -> depth_m
+ * timeUtc     -> time_utc
+ */
+export async function getOceanSlice(params = {}) {
+  return request(`/api/v1/ocean/slice${buildQuery(params)}`);
+}
+
+/**
+ * GET /api/v1/argo/profiles
+ */
+export async function getArgoProfiles(params = {}) {
+  return request(`/api/v1/argo/profiles${buildQuery(params)}`);
+}
+
+/**
+ * GET /api/v1/argo/profile
+ */
+export async function getArgoProfile(params = {}) {
+  return request(`/api/v1/argo/profile${buildQuery(params)}`);
+}
+
+/**
+ * POST /api/v1/navigation/route
+ */
+export async function postNavigationRoute(payload = {}) {
+  return request("/api/v1/navigation/route", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+/**
+ * Generic GET helper.
+ */
+export async function getJson(path, params = {}) {
+  return request(`${path}${buildQuery(params)}`);
+}
+
+/**
+ * Generic POST helper.
+ */
+export async function postJson(path, payload = {}) {
+  return request(path, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+/**
+ * Export API base URL.
+ */
+export { API_BASE_URL };
