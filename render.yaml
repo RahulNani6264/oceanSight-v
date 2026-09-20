@@ -22,4 +22,4 @@ services:
         fromService:
           type: web
           name: oceansight-backend
-          property: hostname
+          property: host
