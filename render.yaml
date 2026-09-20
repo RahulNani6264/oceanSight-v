@@ -1,8 +1,5 @@
 # Render Blueprint for OceanSight-V
-# This file defines the services to be deployed on Render.
-
 services:
-  # Backend API Service (FastAPI)
   - type: web
     name: oceansight-backend
     env: python
@@ -13,11 +10,10 @@ services:
       uvicorn app.api:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.7
+        value: "3.11.7"
     healthCheckPath: /
     root: .
 
-  # Frontend Service (Static Site via Nginx)
   - type: web
     name: oceansight-frontend
     plan: free
